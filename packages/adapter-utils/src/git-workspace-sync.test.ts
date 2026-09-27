@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -40,7 +40,7 @@ describe("git workspace sync", () => {
       if (!dir) continue;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
-  });
+  }, 30_000); // The output-limit fixture removes 40,000 files on teardown.
 
   it("delegates every host-side full-tree enumeration to the registered scheduler", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-scheduler-hook-"));
@@ -133,6 +133,57 @@ describe("git workspace sync", () => {
     expect((await readGitWorkspaceSnapshot(repo))?.ignoredPaths).toEqual(["dependencies", "token.secret"]);
     expect(ignoredArgs).toEqual(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"]);
   });
+
+  it("snapshots a generated directory with more than 1 MiB of filenames", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-git-large-untracked-"));
+    cleanupDirs.push(rootDir);
+    const repo = await createRepo(rootDir);
+    const generatedDir = path.join(repo, "storybook-output");
+    await mkdir(generatedDir);
+    const names = Array.from({ length: 5_000 }, (_, index) => `${"asset-".repeat(36)}${index}.js`);
+    for (let start = 0; start < names.length; start += 100) {
+      await Promise.all(names.slice(start, start + 100).map((name) => writeFile(path.join(generatedDir, name), "")));
+    }
+    const raw = await runLocalGit(repo, ["ls-files", "--others", "--exclude-standard", "-z"], {
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    expect(Buffer.byteLength(raw.stdout)).toBeGreaterThan(1024 * 1024);
+    setExpensiveWorkspaceGitExecutor((input) => runLocalGit(input.localDir, [...input.args], {
+      timeout: input.timeout,
+      maxBuffer: input.maxBuffer,
+    }));
+
+    const snapshot = await readGitWorkspaceSnapshot(repo);
+    expect(snapshot?.overlayPaths).toEqual(
+      names.map((name) => `storybook-output/${name}`).sort((left, right) => left.localeCompare(right)),
+    );
+
+    // A larger tree exceeds the old 8 MiB bound but fits the new 32 MiB bound.
+    for (let start = 5_000; start < 40_000; start += 100) {
+      await Promise.all(Array.from({ length: 100 }, (_, index) => writeFile(
+        path.join(generatedDir, `${"asset-".repeat(36)}${start + index}.js`), "",
+      )));
+    }
+    const largerRaw = await runLocalGit(repo, ["ls-files", "--others", "--exclude-standard", "-z"], {
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    expect(Buffer.byteLength(largerRaw.stdout)).toBeGreaterThan(8 * 1024 * 1024);
+    const largerSnapshot = await readGitWorkspaceSnapshot(repo);
+    expect(largerSnapshot?.overlayPaths).toEqual(
+      largerRaw.stdout.split("\0").filter(Boolean).sort((left, right) => left.localeCompare(right)),
+    );
+
+    // Reuse the files with longer parent paths to exceed 32 MiB without
+    // creating hundreds of thousands of files solely to test the bound.
+    const deepParent = path.join(repo, ...Array.from({ length: 4 }, () => "nested-".repeat(30)));
+    await mkdir(deepParent, { recursive: true });
+    await rename(generatedDir, path.join(deepParent, "storybook-output"));
+    expect(Buffer.byteLength(largerRaw.stdout) + 40_000 * (path.relative(repo, deepParent).length + 1))
+      .toBeGreaterThan(32 * 1024 * 1024);
+    await expect(readGitWorkspaceSnapshot(repo)).rejects.toMatchObject({
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+    });
+  }, 60_000);
 
   async function createRepo(rootDir: string): Promise<string> {
     const repo = path.join(rootDir, "repo");
