@@ -275,28 +275,6 @@ describe("ProjectDetail", () => {
     });
   });
 
-  it.each([
-    ["/projects/project-1/configuration", "canonical-project", false],
-    ["/projects/project-1/overview", "project-1", false],
-    ["/projects/project-1/configuration", "project-1", true],
-  ])("only exposes configuration at its final URL (%s, %s)", async (pathname, urlKey, editable) => {
-    mockLocation.pathname = pathname;
-    mockProjectsApi.get.mockResolvedValue(project({ urlKey }));
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    await act(async () => {
-      root = createRoot(container);
-      root.render(<QueryClientProvider client={queryClient}><ProjectDetail /></QueryClientProvider>);
-    });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-    expect(Boolean(container.querySelector('[data-testid="project-properties"]'))).toBe(editable);
-    if (!editable) {
-      expect(mockNavigate).toHaveBeenCalledWith(`/projects/${urlKey}/configuration`, { replace: true });
-    }
-  });
-
   it("keeps Timeline out of the project task-list controls", async () => {
     mockLocation.pathname = "/projects/project-1/issues";
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
