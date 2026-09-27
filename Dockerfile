@@ -307,7 +307,14 @@ RUN mkdir -p /provider-pack \
   fi
 
 FROM production AS cloud
-COPY --chown=node:node --from=cloud-provider-pack /provider-pack /opt/paperclip-runner/provider-pack
+COPY --from=cloud-provider-pack /provider-pack /opt/paperclip-runner/provider-pack
+# Cloud remaps node's UID at startup. This immutable pack contains public code
+# and integrity metadata, never credentials; it must remain readable afterward.
+# Keep it root-owned and verify access as an unrelated unprivileged UID.
+RUN chmod -R a+rX /opt/paperclip-runner/provider-pack \
+  && if [ -f /opt/paperclip-runner/provider-pack/provider-pack.json ]; then \
+    gosu 65534:65534 node -e 'const fs = require("node:fs"); const path = require("node:path"); const root = "/opt/paperclip-runner/provider-pack"; const manifest = JSON.parse(fs.readFileSync(path.join(root, "provider-pack.json"), "utf8")); for (const artifact of Object.values(manifest.payload.artifacts)) fs.readFileSync(path.join(root, artifact.path)); fs.accessSync(path.join(root, manifest.payload.artifacts.nodeCommand.path), fs.constants.X_OK);'; \
+  fi
 ENV PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH=/opt/paperclip-runner/provider-pack
 COPY --chown=node:node --from=cloud-plugins /app/packages/plugins/sandbox-providers /app/packages/plugins/sandbox-providers
 # Land the isolated install inside the server's own `node_modules`, the

@@ -116,6 +116,10 @@ describe("Cloud remote provider pack", () => {
     expect(pack).toContain("mkdir -p /provider-pack");
     expect(pack).toContain("Skipping remote provider pack");
     expect(cloud).toContain("--from=cloud-provider-pack /provider-pack /opt/paperclip-runner/provider-pack");
+    expect(cloud).not.toContain("--chown=node:node --from=cloud-provider-pack");
+    expect(cloud).toContain("chmod -R a+rX /opt/paperclip-runner/provider-pack");
+    expect(cloud).toContain("gosu 65534:65534 node");
+    expect(cloud).toContain("Object.values(manifest.payload.artifacts)");
     expect(cloud).toContain("PAPERCLIP_RUNNER_REMOTE_PROVIDER_PACK_PATH=/opt/paperclip-runner/provider-pack");
     expect(dockerfile).not.toContain("provision-grok.mjs");
   });
