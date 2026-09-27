@@ -1904,12 +1904,12 @@
       ]
     },
     {
-      "id": "skill:skills/paperclip/references/api-reference.md:blocker-questions-and-dependencies:691",
+      "id": "skill:skills/paperclip/references/api-reference.md:questions-and-dependencies:691",
       "sourceKind": "skill_heading",
       "sourceAnchor": "skills/paperclip/references/api-reference.md:691",
-      "title": "Blocker questions and dependencies",
-      "expectedSemantics": "Skill guidance headed “Blocker questions and dependencies”.",
-      "primaryDisposition": "control_plane_owned",
+      "title": "Questions and dependencies",
+      "expectedSemantics": "Skill guidance headed “Questions and dependencies”.",
+      "primaryDisposition": "always_agent_tool",
       "requiredGrants": [],
       "assertionClasses": [
         "control_plane_invariant"

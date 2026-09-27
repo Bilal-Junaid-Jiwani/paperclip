@@ -167,7 +167,7 @@ The skill/reference inventory and eval cases are the only normative behavior sou
 | skill:skills/paperclip/references/api-reference.md:update:639 | optional_agent_tool | skills/paperclip/references/api-reference.md:639 |
 | skill:skills/paperclip/references/api-reference.md:cross-team-work-and-delegation:677 | optional_agent_tool | skills/paperclip/references/api-reference.md:677 |
 | skill:skills/paperclip/references/api-reference.md:receiving-cross-team-work:681 | optional_agent_tool | skills/paperclip/references/api-reference.md:681 |
-| skill:skills/paperclip/references/api-reference.md:blocker-questions-and-dependencies:691 | control_plane_owned | skills/paperclip/references/api-reference.md:691 |
+| skill:skills/paperclip/references/api-reference.md:questions-and-dependencies:691 | always_agent_tool | skills/paperclip/references/api-reference.md:691 |
 | skill:skills/paperclip/references/api-reference.md:company-context:703 | optional_agent_tool | skills/paperclip/references/api-reference.md:703 |
 | skill:skills/paperclip/references/api-reference.md:company-branding-ceo-board:715 | optional_agent_tool | skills/paperclip/references/api-reference.md:715 |
 | skill:skills/paperclip/references/api-reference.md:openclaw-invite-prompt-ceo:735 | optional_agent_tool | skills/paperclip/references/api-reference.md:735 |

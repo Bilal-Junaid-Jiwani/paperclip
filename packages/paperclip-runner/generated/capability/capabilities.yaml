@@ -634,8 +634,8 @@
     {
       "id": "skill:skills/paperclip/references/api-reference.md:691",
       "kind": "skill_heading",
-      "sourceAnchor": "skills/paperclip/references/api-reference.md#L691:blocker-questions-and-dependencies",
-      "heading": "Blocker questions and dependencies",
+      "sourceAnchor": "skills/paperclip/references/api-reference.md#L691:questions-and-dependencies",
+      "heading": "Questions and dependencies",
       "primaryDisposition": "always_agent_tool",
       "semanticOperation": "request_human_input",
       "expectedMockState": "operation_result"
