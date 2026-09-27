@@ -48,7 +48,7 @@ describe("new task artifacts", () => {
     await act(async () => root.render(<Watch {...props} />));
   }
 
-  it("surfaces independently loaded history and deduplicates attachment work products", async () => {
+  it("registers existing artifacts as their queries load", async () => {
     await render({ attachments: undefined, workProducts: undefined, documents: undefined });
     await render({ attachments: [attachment()] });
     await render({ documents: [document()] });
@@ -87,7 +87,7 @@ describe("new task artifacts", () => {
     expect(onArrival).toHaveBeenCalledTimes(2);
   });
 
-  it("surfaces a newly navigated task and detects its subsequent additions", async () => {
+  it("registers a newly navigated task and detects its subsequent additions", async () => {
     await render();
     await render({ issueId: "task-2", attachments: undefined, documents: undefined, workProducts: undefined });
     await render({ attachments: [attachment()], documents: [], workProducts: [] });

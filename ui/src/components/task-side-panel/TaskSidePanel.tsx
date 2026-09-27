@@ -393,7 +393,8 @@ export function TaskSidePanel({
   useEffect(() => {
     if (artifactsOpenRequestId === undefined || handledArtifactsRequestRef.current === artifactsOpenRequestId) return;
     handledArtifactsRequestRef.current = artifactsOpenRequestId;
-    setLauncherOpen(false);
+    // Background outputs add a discoverable tab without interrupting the
+    // current document, file, or launcher. Opening the pane is a user action.
     controller.openTab(taskPanelArtifactsTab(), false);
     onArtifactsOpened?.(artifactsOpenRequestId);
   }, [artifactsOpenRequestId, controller.openTab, onArtifactsOpened]);

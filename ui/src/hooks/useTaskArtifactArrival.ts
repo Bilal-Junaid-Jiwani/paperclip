@@ -16,7 +16,7 @@ interface TaskArtifactArrivalOptions {
   onArrival: () => void;
 }
 
-/** Surface durable artifacts on initial load and on subsequent arrivals. */
+/** Register the same durable objects as the Artifacts tab, including history. */
 export function useTaskArtifactArrival({
   issueId, attachments, workProducts, documents, onArrival,
 }: TaskArtifactArrivalOptions) {

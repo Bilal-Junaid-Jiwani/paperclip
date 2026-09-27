@@ -164,7 +164,7 @@ describe("TaskSidePanel", () => {
     expect(container.textContent).toContain("Properties content");
   });
 
-  it("opens Artifacts on a new arrival, preserving manual selection across arrivals", async () => {
+  it("adds Artifacts on arrival while preserving the selected tab", async () => {
     await render(panel());
     await act(async () => container.querySelector<HTMLButtonElement>("#side-panel-tab-properties")?.click());
     await render(panel({ artifactsOpenRequestId: 1 }));
@@ -176,7 +176,6 @@ describe("TaskSidePanel", () => {
     expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Properties");
 
     await render(panel({ artifactsOpenRequestId: 2 }));
-    expect(container.querySelectorAll('[data-side-panel-tab-target="artifacts"]')).toHaveLength(1);
     expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Properties");
     expect(container.querySelectorAll('[data-side-panel-tab-target="artifacts"]')).toHaveLength(1);
   });
@@ -188,7 +187,6 @@ describe("TaskSidePanel", () => {
     await render(panel({ artifactsOpenRequestId: 1 }));
     expect(container.querySelector('[data-side-panel-tab-target="artifacts"]')).toBeNull();
     await render(panel({ artifactsOpenRequestId: 2 }));
-    expect(container.querySelectorAll('[data-side-panel-tab-target="artifacts"]')).toHaveLength(1);
     expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Properties");
   });
 
@@ -204,7 +202,7 @@ describe("TaskSidePanel", () => {
     expect(onArtifactsOpened).toHaveBeenCalledTimes(1);
   });
 
-  it("preserves the workspace-file route and selection when an artifact arrives", async () => {
+  it("keeps the workspace-file route and selection when an artifact arrives", async () => {
     routeFixture.location.search = "?file=ui%2Fsrc%2FApp.tsx&workspace=project";
     window.history.replaceState(null, "", `${routeFixture.location.pathname}${routeFixture.location.search}`);
     await render(panel({ fileTabsEnabled: true }));
@@ -234,6 +232,16 @@ describe("TaskSidePanel", () => {
 
     await render(panel({ documentDeepLink: { ...documentDeepLink, requestId: 2 } }));
     expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("AGENTS.md");
+  });
+
+  it("keeps a document selected when an artifact arrives", async () => {
+    fixture.documents = [issueDocument("report", "Report")];
+    const documentDeepLink = { documentKey: "report", requestId: 1 };
+    await render(panel({ documentDeepLink }));
+    await render(panel({ documentDeepLink, artifactsOpenRequestId: 1 }));
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Report");
+    expect(container.querySelectorAll('[data-side-panel-tab-target="artifacts"]')).toHaveLength(1);
+    expect(container.textContent).toContain("Document report");
   });
 
   it("uses the approved pre-rebase tab appearance for Streamlined UI", async () => {
