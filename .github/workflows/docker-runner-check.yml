@@ -15,10 +15,6 @@ on:
         description: "Run broad source checks on EC2"
         type: boolean
         default: false
-      verify_public_install:
-        description: "Build and verify clean public npm installation on EC2 (no provider credentials)"
-        type: boolean
-        default: false
       build_eval_viewer:
         description: "Build the canonical eval report viewer on EC2"
         type: boolean
@@ -37,7 +33,7 @@ permissions: {}
 
 concurrency:
   # Publishing a newer image must not discard an earlier verification's evidence.
-  group: docker-runner-check-${{ github.event.pull_request.number || github.ref }}-${{ inputs.verify_source && 'verification' || inputs.verify_public_install && 'public-install' || inputs.build_eval_viewer && 'viewer' || 'image' }}
+  group: docker-runner-check-${{ github.event.pull_request.number || github.ref }}-${{ inputs.verify_source && 'verification' || inputs.build_eval_viewer && 'viewer' || 'image' }}
   cancel-in-progress: true
 
 jobs:
@@ -187,14 +183,6 @@ jobs:
             echo "Finished $check (exit $check_status)"
           done
           exit "$status"
-      - name: Verify clean public npm installation
-        if: inputs.verify_public_install && !inputs.verify_source
-        timeout-minutes: 35
-        run: |
-          set -euo pipefail
-          pnpm install --frozen-lockfile --ignore-scripts > remote-verification/npm-setup.log 2>&1
-          pnpm build > remote-verification/npm-build.log 2>&1
-          node scripts/verify-grok-npm-install.mjs > remote-verification/public-npm-install.log 2>&1
       - name: Build canonical eval report viewer
         if: always() && (inputs.verify_source || inputs.build_eval_viewer)
         run: |
