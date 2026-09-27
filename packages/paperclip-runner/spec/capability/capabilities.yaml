@@ -1904,11 +1904,11 @@
       ]
     },
     {
-      "id": "skill:skills/paperclip/references/api-reference.md:handling-blockers:691",
+      "id": "skill:skills/paperclip/references/api-reference.md:blocker-questions-and-dependencies:691",
       "sourceKind": "skill_heading",
       "sourceAnchor": "skills/paperclip/references/api-reference.md:691",
-      "title": "Handling blockers",
-      "expectedSemantics": "Skill guidance headed “Handling blockers”.",
+      "title": "Blocker questions and dependencies",
+      "expectedSemantics": "Skill guidance headed “Blocker questions and dependencies”.",
       "primaryDisposition": "control_plane_owned",
       "requiredGrants": [],
       "assertionClasses": [

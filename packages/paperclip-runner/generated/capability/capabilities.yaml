@@ -634,10 +634,10 @@
     {
       "id": "skill:skills/paperclip/references/api-reference.md:691",
       "kind": "skill_heading",
-      "sourceAnchor": "skills/paperclip/references/api-reference.md#L691:handling-blockers",
-      "heading": "Handling blockers",
-      "primaryDisposition": "optional_agent_tool",
-      "semanticOperation": "scoped_discovery",
+      "sourceAnchor": "skills/paperclip/references/api-reference.md#L691:blocker-questions-and-dependencies",
+      "heading": "Blocker questions and dependencies",
+      "primaryDisposition": "always_agent_tool",
+      "semanticOperation": "request_human_input",
       "expectedMockState": "operation_result"
     },
     {
