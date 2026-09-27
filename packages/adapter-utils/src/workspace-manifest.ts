@@ -11,7 +11,7 @@ export const WORKSPACE_STREAM_CHUNK_BYTES = 64 * 1024;
 const DISK_CHECK_INTERVAL_BYTES = 1024 * 1024;
 
 /** A capacity floor, not a total filename budget. Leave room for the host. */
-export function assertWorkspaceManifestDiskSpace(directory: string, requiredBytes = 0): void {
+export function assertWorkspaceManifestDiskSpace(directory: string, requiredBytes = 0): number {
   const configured = Number(process.env.PAPERCLIP_WORKSPACE_MANIFEST_MIN_FREE_BYTES);
   const minimum = Number.isSafeInteger(configured) && configured >= 64 * 1024 * 1024
     ? configured : 256 * 1024 * 1024;
@@ -21,6 +21,7 @@ export function assertWorkspaceManifestDiskSpace(directory: string, requiredByte
       code: "workspace_git_scan_failed",
     });
   }
+  return Number(stat.bavail * stat.bsize - BigInt(minimum));
 }
 export interface PathManifest {
   kind: "path_manifest";
@@ -58,9 +59,15 @@ export class WorkspaceManifestWriter {
   private closed = false;
   private bytesSinceDiskCheck = 0;
   constructor(readonly filePath: string) {
-    assertWorkspaceManifestDiskSpace(path.dirname(filePath));
+    const availableBytes = assertWorkspaceManifestDiskSpace(path.dirname(filePath));
     this.db = openDatabase(filePath, false);
     try {
+      // Admission follows current storage capacity, not filename-list length.
+      // SQLite enforces this before allocating pages, including within a chunk.
+      const pageSize = Number(this.db.prepare("PRAGMA page_size").get()!.page_size);
+      const pageAllowance = Math.floor(availableBytes / 4 / pageSize);
+      if (pageAllowance < 2) throw new Error("Insufficient workspace manifest disk allowance");
+      this.db.exec(`PRAGMA max_page_count=${Math.min(pageAllowance, 4_294_967_294)}`);
       this.db.exec("PRAGMA journal_mode=DELETE; CREATE TABLE records(category TEXT, path TEXT, value TEXT NOT NULL, PRIMARY KEY(category,path)) WITHOUT ROWID;");
       this.insert = this.db.prepare("INSERT OR REPLACE INTO records VALUES(?,?,?)");
       this.db.exec("BEGIN");
@@ -79,7 +86,11 @@ export class WorkspaceManifestWriter {
   batch(work: () => void): void {
     this.db.exec("SAVEPOINT chunk");
     try { work(); this.db.exec("RELEASE chunk"); }
-    catch (error) { this.db.exec("ROLLBACK TO chunk; RELEASE chunk"); throw error; }
+    catch (error) {
+      // SQLITE_FULL can roll back the transaction itself.
+      if (this.db.isTransaction) this.db.exec("ROLLBACK TO chunk; RELEASE chunk");
+      throw error;
+    }
   }
   paths(category: string): PathManifest {
     const row = this.db.prepare("SELECT count(*) AS count FROM records WHERE category=?").get(category)!;
@@ -88,7 +99,7 @@ export class WorkspaceManifestWriter {
   close(commit = true): void {
     if (this.closed) return;
     this.closed = true;
-    try { this.db.exec(commit ? "COMMIT" : "ROLLBACK"); }
+    try { if (this.db.isTransaction) this.db.exec(commit ? "COMMIT" : "ROLLBACK"); }
     finally { this.db.close(); }
   }
 }
