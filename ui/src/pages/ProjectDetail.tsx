@@ -675,6 +675,11 @@ export function ProjectDetail() {
   if (isLoading) return <PageSkeleton variant="detail" />;
   if (error) return <p className="text-sm text-destructive">{error.message}</p>;
   if (!project) return null;
+  // Canonical navigation changes the project query key and can unmount this
+  // form. Do not accept edits that the pending redirect would discard.
+  if (activeTab === "configuration" && (
+    routeProjectRef !== canonicalProjectRef || location.pathname.endsWith("/overview")
+  )) return <PageSkeleton variant="detail" />;
   const showLeftProjectNotice =
     projectMembershipState === "left" && !dismissedLeftProjectIds.has(project.id);
   const projectMembershipPending =
