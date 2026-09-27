@@ -1,3 +1,9 @@
+import {
+  withNativeWorkspaceFinalizationOwnership,
+  NativeWorkspaceFinalizationBusyError,
+  NativeWorkspaceFinalizationOwnershipLostError,
+  type NativeWorkspaceFinalizationOwnership,
+} from "./native-runtime/native-workspace-finalization-ownership.js";
 import { applyWorkspaceRestoreFailure } from "@paperclipai/adapter-utils/workspace-restore-result";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slack-conversation-state.js";
@@ -24431,44 +24437,75 @@ export function heartbeatService(
           // If recording the barrier itself fails, propagate as a run failure
           // rather than silently leaving dependents stranded behind a missing
           // finalize row.
-          if (nativeWorkspaceSync) {
-            await nativeWorkspaceSync.restoreWorkspace();
-          }
-          await db
-            .update(heartbeatRuns)
-            .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
-            .where(
-              and(
-                eq(heartbeatRuns.id, run.id),
-                eq(heartbeatRuns.status, "running"),
-              ),
-            );
-          const workspaceFinalizeStatus = hasWorkspaceRestoreFailure(adapterResult.resultJson) ? "failed" : "succeeded";
-          await recordWorkspaceFinalize(workspaceFinalizeStatus);
-          if (adapterResult.nativeFinalization) {
-            adapterResult.nativeFinalization.workspaceFinalizeStatus =
-              workspaceFinalizeStatus;
+          const completeWorkspace = async (ownership?: NativeWorkspaceFinalizationOwnership) => {
             try {
-              const finalized = await finalizeNativeRun({
-                db,
-                runId: run.id,
-                workspaceFinalizeStatus,
-                preserveProviderAttempt: Boolean(nativeWorkspaceSync),
-              });
-              await dispatchPendingNativeStatusWakeups({
-                companyId: run.companyId,
-              });
-              if (finalized.phase === "committed") {
-                await nativeWorkspaceSync?.cleanup();
+              if (nativeWorkspaceSync) {
+                const exported = await db.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
+                  eq(workspaceOperations.companyId, run.companyId),
+                  eq(workspaceOperations.heartbeatRunId, run.id),
+                  eq(workspaceOperations.phase, "workspace_finalize"),
+                  eq(workspaceOperations.status, "succeeded"),
+                )).limit(1);
+                if (exported.length) adapterFinalizeOutcome = "succeeded";
+                else await nativeWorkspaceSync.restoreWorkspace(ownership?.assertHeld);
               }
-            } catch (finalizeErr) {
-              logger.warn(
-                { err: finalizeErr, runId: run.id },
-                "native result persisted but finalization did not apply; the reconciliation loop will retry",
-              );
+              await ownership?.assertHeld();
+              await db
+                .update(heartbeatRuns)
+                .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
+                .where(
+                  and(
+                    eq(heartbeatRuns.id, run.id),
+                    eq(heartbeatRuns.status, "running"),
+                  ),
+                );
+              const workspaceFinalizeStatus = hasWorkspaceRestoreFailure(adapterResult.resultJson) ? "failed" : "succeeded";
+              await recordWorkspaceFinalize(workspaceFinalizeStatus);
+              if (adapterResult.nativeFinalization) {
+                adapterResult.nativeFinalization.workspaceFinalizeStatus =
+                  workspaceFinalizeStatus;
+                try {
+                  const finalized = await finalizeNativeRun({
+                    db,
+                    runId: run.id,
+                    workspaceFinalizeStatus,
+                    preserveProviderAttempt: Boolean(nativeWorkspaceSync),
+                  });
+                  await dispatchPendingNativeStatusWakeups({
+                    companyId: run.companyId,
+                  });
+                  if (finalized.phase === "committed") {
+                    await nativeWorkspaceSync?.cleanup();
+                  }
+                } catch (finalizeErr) {
+                  logger.warn(
+                    { err: finalizeErr, runId: run.id },
+                    "native result persisted but finalization did not apply; the reconciliation loop will retry",
+                  );
+                }
+              }
+            } catch (error) {
+              if (ownership) {
+                await ownership.assertHeld();
+                await recordWorkspaceFinalize("failed");
+              }
+              throw error;
             }
+          };
+          if (nativeWorkspaceSync) {
+            const owned = await withNativeWorkspaceFinalizationOwnership({
+              db, companyId: run.companyId, runId: run.id,
+            }, completeWorkspace);
+            if (!owned.acquired) throw new NativeWorkspaceFinalizationBusyError();
+          } else {
+            await completeWorkspace();
           }
         } catch (adapterErr) {
+          if (adapterErr instanceof NativeWorkspaceFinalizationBusyError
+            || adapterErr instanceof NativeWorkspaceFinalizationOwnershipLostError) {
+            nativeWorkspaceFinalizeScheduled = true;
+            throw adapterErr;
+          }
           if (adapterErr instanceof NativeControllerDetachedForRestartError) {
             // Preserve the provider and its run for the new controller. This
             // also keeps generic teardown from terminalizing/releasing its lease.
@@ -25406,6 +25443,14 @@ export function heartbeatService(
               coordinator.nextAttemptAt,
             );
           }
+          return;
+        }
+        if (err instanceof NativeWorkspaceFinalizationBusyError
+          || err instanceof NativeWorkspaceFinalizationOwnershipLostError) {
+          // Another exact owner is finishing copyback, or this owner lost its
+          // lock connection. Preserve the accepted result and let reconciliation
+          // inspect durable ownership; neither case consumes an export retry.
+          logger.info({ runId: run.id, reason: err.message }, "native workspace finalization deferred to its durable owner");
           return;
         }
         if (err instanceof NativeWorkspaceFinalizeScheduledError) {

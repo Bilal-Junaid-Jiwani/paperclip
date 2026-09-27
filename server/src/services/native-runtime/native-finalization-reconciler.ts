@@ -855,6 +855,8 @@ export async function reconcileNativeFinalizations(
         runId: row.runId,
         environmentRuntime: options.environmentRuntime,
       });
+      // Busy is ownership, not another failed export or retry-budget debit.
+      if (!operation) continue;
       const workspaceFinalizeStatus =
         operation.status === "succeeded" ? "succeeded" : "failed";
       if (workspaceFinalizeStatus === "failed") {

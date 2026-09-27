@@ -12,12 +12,14 @@ import {
   heartbeatRuns,
   heartbeatRunEvents,
   issueApprovals,
+  issueRecoveryActions,
   issueThreadInteractions,
   issues,
   nativeRunFinalizations,
   nativeRunResults,
   statusDecisions,
   workAssessments,
+  workspaceOperations,
 } from "@paperclipai/db";
 import { classifyNativeEvidence } from "./evidence-classifier.js";
 import type { PrpIgnoredAttentionRequest } from "@paperclipai/paperclip-runner";
@@ -282,6 +284,29 @@ async function recordRetryableFailure(input: {
         : ("failed" as const);
   let terminalRunToEmit: typeof heartbeatRuns.$inferSelect | null = null;
   const outcome = await input.db.transaction(async (tx) => {
+    // Admission snapshots cannot authorize a failure write after a different
+    // owner committed success. Match status-committer lock ordering.
+    const current = await tx.select().from(nativeRunFinalizations).where(and(
+      eq(nativeRunFinalizations.runId, input.run.id),
+      eq(nativeRunFinalizations.companyId, input.run.companyId),
+    )).for("update").limit(1).then((rows) => rows[0] ?? null);
+    if (!current) throw new Error("native_finalization_missing");
+    if (current.phase === "committed" || current.phase === "terminal_failure"
+      || current.leaseOwner !== input.coordinator.leaseOwner) return current;
+    const [currentRun] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.run.id)).limit(1);
+    if (!currentRun) throw new Error("native_finalization_run_missing");
+    if (input.failureScope === "workspace") {
+      const exported = await tx.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
+        eq(workspaceOperations.companyId, input.run.companyId),
+        eq(workspaceOperations.heartbeatRunId, input.run.id),
+        eq(workspaceOperations.phase, "workspace_finalize"),
+        eq(workspaceOperations.status, "succeeded"),
+      )).limit(1);
+      // The live exporter may have acquired ownership since the stale error
+      // was raised, or already durably published a successful copyback.
+      if (exported.length || record(currentRun.runnerProfileJson).nativeWorkspaceFinalizationOwner) return current;
+    }
+    input = { ...input, coordinator: current, run: currentRun };
     const issue = await tx
       .select({
         lastStatusDecisionId: issues.lastStatusDecisionId,
@@ -525,6 +550,7 @@ export async function recordNativeFinalizationFailure(input: {
   if (!run || run.runtimeMode !== "native" || !coordinator) throw input.error;
   const message =
     input.error instanceof Error ? input.error.message : String(input.error);
+  if (message === "native_finalization_lease_busy") return coordinator;
   const failureCode = message.startsWith("native_")
     ? message
     : "native_finalization_invalid";
@@ -543,6 +569,19 @@ export async function recordNativeFinalizationFailure(input: {
     projectRunStatus: input.projectRunStatus,
     failureScope: input.failureScope,
     permanent: input.permanent,
+  });
+}
+
+async function resolveCommittedFinalizationRecovery(db: Db, run: typeof heartbeatRuns.$inferSelect, issueId: string) {
+  const actions = await db.select().from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
+    eq(issueRecoveryActions.kind, "active_run_watchdog"), inArray(issueRecoveryActions.status, ["active", "escalated"]),
+    sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+    sql`${issueRecoveryActions.wakePolicy}->>'kind' = 'resume_native_run'`,
+  ));
+  for (const action of actions) await issueRecoveryActionService(db).resolveActiveForIssue({
+    companyId: run.companyId, sourceIssueId: issueId, actionId: action.id,
+    status: "resolved", outcome: "restored", resolutionNote: "The accepted native result and workspace finalization committed successfully; this run needs no further finalization retry.",
   });
 }
 
@@ -599,10 +638,10 @@ async function projectCommittedRun(input: {
                   'observedAt', ${heartbeatRuns.updatedAt}
                 )
               )
-              else ${heartbeatRuns.resultJson}
-            end`,
+              else coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
+            end || jsonb_build_object('finalizationPhase', 'committed', 'failureCode', null, 'originalFailureCode', null, 'nextAttemptAt', null)`,
           }
-        : {}),
+        : { resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || jsonb_build_object('finalizationPhase', 'committed', 'failureCode', null, 'originalFailureCode', null, 'nextAttemptAt', null)` }),
       updatedAt: now,
     })
     .where(
@@ -618,6 +657,10 @@ async function projectCommittedRun(input: {
               isNotNull(heartbeatRuns.errorCode),
               isNull(heartbeatRuns.finishedAt),
               sql`${heartbeatRuns.nativePhase} is distinct from 'committed'`,
+              sql`${heartbeatRuns.resultJson}->>'finalizationPhase' is distinct from 'committed'`,
+              sql`${heartbeatRuns.resultJson}->>'nextAttemptAt' is not null`,
+              sql`${heartbeatRuns.resultJson}->>'failureCode' is not null`,
+              sql`${heartbeatRuns.resultJson}->>'originalFailureCode' is not null`,
             ),
           ),
         ),
@@ -629,6 +672,10 @@ async function projectCommittedRun(input: {
           sql`${heartbeatRuns.status} is distinct from ${projectedStatus}`,
           isNull(heartbeatRuns.finishedAt),
           sql`${heartbeatRuns.nativePhase} is distinct from 'committed'`,
+          sql`${heartbeatRuns.resultJson}->>'finalizationPhase' is distinct from 'committed'`,
+          sql`${heartbeatRuns.resultJson}->>'nextAttemptAt' is not null`,
+          sql`${heartbeatRuns.resultJson}->>'failureCode' is not null`,
+          sql`${heartbeatRuns.resultJson}->>'originalFailureCode' is not null`,
           ...(terminalState === "succeeded"
             ? [isNotNull(heartbeatRuns.error), isNotNull(heartbeatRuns.errorCode)]
             : []),
@@ -1045,6 +1092,7 @@ export async function finalizeNativeRun(input: {
         logger.warn({ err, runId: run.id }, "Slack conversation settlement deferred to reconciliation");
       });
     }
+    await resolveCommittedFinalizationRecovery(input.db, run, coordinator.issueId);
     return coordinator;
   }
   const [resultRow, contractRow] = await Promise.all([
@@ -1319,6 +1367,7 @@ export async function finalizeNativeRun(input: {
           resultJson: {
             ...record(run.resultJson),
             finalizationPhase,
+            ...(finalizationPhase === "committed" ? { failureCode: null, originalFailureCode: null, nextAttemptAt: null } : {}),
             assessmentId: assessmentRow.id,
             decisionId: committed.decision.id,
             authoritativeDecision: decision.toStatus,
@@ -1374,6 +1423,7 @@ export async function finalizeNativeRun(input: {
           logger.warn({ err, runId: run.id }, "Slack conversation settlement deferred to reconciliation");
         });
       }
+      if (finalizationPhase === "committed") await resolveCommittedFinalizationRecovery(input.db, run, coordinator.issueId);
       return {
         ...coordinator,
         phase: finalizationPhase,
