@@ -220,8 +220,38 @@ describe("native workspace finalization recovery", () => {
       .toEqual({ acquired: true, value: "recovered" });
   });
 
-  it("recovers a receipt after the exact controller process on this host exited", async () => {
+  it("never steals pending copyback from an orphan child after its controller is killed", async () => {
+    const seeded = await seedRun({ executionWorkspaceId: randomUUID(), title: "Orphan copyback child" });
+    const output = path.join(workspaceRoot, "orphan-copyback.txt");
+    const childScript = `const fs = require('node:fs'); setInterval(() => fs.appendFileSync(${JSON.stringify(output)}, 'copying\\n'), 25);`;
+    const parentScript = `const {spawn} = require('node:child_process'); const child = spawn(process.execPath, ['-e', ${JSON.stringify(childScript)}], {detached:true, stdio:'ignore'}); console.log(child.pid); child.unref(); setInterval(() => {}, 1000);`;
+    const parent = spawn(process.execPath, ["-e", parentScript], { stdio: ["ignore", "pipe", "ignore"] });
+    const [chunk] = await once(parent.stdout!, "data");
+    const childPid = Number(String(chunk).trim());
+    expect(childPid).toBeGreaterThan(0);
+    try {
+      const startedAt = await readProcessStartedAt(parent.pid!);
+      const exited = once(parent, "close");
+      parent.kill("SIGKILL"); await exited;
+      process.kill(childPid, 0); // The copyback child outlived the exact controller.
+      await db.update(heartbeatRuns).set({ runnerProfileJson: { nativeWorkspaceFinalizationOwner: {
+        token: randomUUID(), hostname: os.hostname(), pid: parent.pid, processStartedAt: startedAt,
+      } } }).where(eq(heartbeatRuns.id, seeded.runId));
+      const work = vi.fn(async () => "second physical writer");
+      expect(await withNativeWorkspaceFinalizationOwnership({ db, companyId, runId: seeded.runId }, work)).toEqual({ acquired: false });
+      expect(work).not.toHaveBeenCalled();
+      const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId));
+      expect(action).toMatchObject({ ownerType: "board", cause: "native_workspace_finalization_owner_unverified", wakePolicy: null });
+    } finally {
+      parent.kill("SIGKILL");
+      try { process.kill(-childPid, "SIGKILL"); } catch { /* fixture already exited */ }
+    }
+  });
+
+  it("recovers completed copyback after the exact controller process on this host exited", async () => {
     const seeded = await seedRun({ executionWorkspaceId: randomUUID(), title: "Dead copyback controller" });
+    await db.insert(workspaceOperations).values({ companyId, heartbeatRunId: seeded.runId,
+      issueId: seeded.issueId, phase: "workspace_finalize", status: "succeeded" });
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     await once(child, "spawn");
     const startedAt = await readProcessStartedAt(child.pid!);

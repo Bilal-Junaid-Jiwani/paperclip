@@ -15,12 +15,16 @@ receipt. Losing the lock connection does not prove physical copyback stopped:
 a contender still refuses a receipt whose controller is alive. The original
 callback joins before its token is released, and publication checks the lock
 connection and token. Graceful completion clears the receipt. A controller that
-has exited on the same host can be recovered; PID reuse is checked against its
-recorded start time rather than trusted by PID alone.
+has exited on the same host can be recovered automatically only when a durable
+successful workspace barrier proves its copyback finished. A dead parent can
+leave tar/Git children alive, so incomplete copyback requires operator stop
+verification even on the same host. PID reuse is checked against its recorded
+start time rather than trusted by PID alone.
 
-## Controller replacement on a different host
+## Unverified copyback after controller replacement
 
-The controller cannot verify a process on a foreign or unknown host. It surfaces
+The controller cannot verify a process on a foreign or unknown host, or orphaned
+copyback children after an abrupt parent death before the success barrier. It surfaces
 `native_workspace_finalization_owner_unverified` as board-owned recovery, with no
 automatic provider wake. This is an intentional limit: elapsed time or a missing
 database connection never proves the old copyback process stopped.

@@ -3,7 +3,7 @@ import { nativeSha256 } from "./canonical.js";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import { and, eq, sql } from "drizzle-orm";
-import { heartbeatRuns, withDedicatedDbConnection, type Db } from "@paperclipai/db";
+import { heartbeatRuns, workspaceOperations, withDedicatedDbConnection, type Db } from "@paperclipai/db";
 import {
   currentNativeControllerIdentity,
   evaluateNativeControllerTakeover,
@@ -68,8 +68,7 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
       const rawPrior = run.profile?.[OWNER_KEY];
       if (rawPrior != null) {
         const prior = readOwner(rawPrior);
-        // A foreign host or malformed receipt cannot prove the old physical owner stopped.
-        if (!prior || prior.hostname !== owner.hostname) {
+        const requireStopVerification = async () => {
           if (run.issueId) await issueRecoveryActionService(input.db).upsertSourceScoped({
             companyId: input.companyId, sourceIssueId: run.issueId,
             kind: "active_run_watchdog", ownerType: "board", returnOwnerAgentId: run.agentId,
@@ -80,12 +79,25 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
             wakePolicy: null, maxAttempts: 1, supersedeOnIdentityChange: true,
           });
           return { acquired: false } as const;
-        }
+        };
+        // A foreign host or malformed receipt cannot prove the old physical owner stopped.
+        if (!prior || prior.hostname !== owner.hostname) return requireStopVerification();
         const takeover = await evaluateNativeControllerTakeover({
           owner: { leaseOwner: prior.token, leaseExpiresAt: new Date(0), controllerPid: prior.pid,
             controllerProcessStartedAt: new Date(prior.processStartedAt) }, now: new Date(),
         });
         if (!takeover.allowed) return { acquired: false } as const;
+        // A dead parent may have orphaned tar/Git children. Only a durable
+        // completed-copyback barrier proves they joined; otherwise board proof
+        // is required even on the same host. Both callers reuse this barrier.
+        const [completedCopyback] = await input.db.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
+          eq(workspaceOperations.companyId, input.companyId),
+          eq(workspaceOperations.heartbeatRunId, input.runId),
+          eq(workspaceOperations.issueId, run.issueId!),
+          eq(workspaceOperations.phase, "workspace_finalize"),
+          eq(workspaceOperations.status, "succeeded"),
+        )).limit(1);
+        if (!completedCopyback) return requireStopVerification();
       }
       await input.db.update(heartbeatRuns).set({
         runnerProfileJson: sql`jsonb_set(coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb), array[${OWNER_KEY}], ${JSON.stringify(owner)}::jsonb)`,
