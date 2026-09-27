@@ -69,6 +69,7 @@ it("rejects reasoning mislabeled as assistant text without echoing private conte
   assistant.payload.prpEvent.payload.update.kind = "agentMessage";
   expect(reasoningProjectionFailures([assistant])).toEqual([]);
 });
+
 describe("complete run event evidence", () => {
   const page = Array.from({ length: 1000 }, (_, i) => ({ seq: i + 1, eventType: "item.delta" }));
   it("reads completion events beyond the first 1000 rows", async () => {

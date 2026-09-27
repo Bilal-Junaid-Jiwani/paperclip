@@ -1,3 +1,5 @@
+import { applyWorkspaceRestoreFailure } from "@paperclipai/adapter-utils/workspace-restore-result";
+import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slack-conversation-state.js";
 import { settleSlackConversation } from "./slack-conversation-lifecycle.js";
 import { publicChatTaskUrl } from "./chat-task-url.js";
@@ -32,10 +34,10 @@ import {
   registerAdapterExecutionControl,
   waitForAdapterStop,
 } from "./adapter-execution-control.js";
-import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
+import { executionFailureRetryCount, executionRetryAttemptCount, accountingForScheduledRetry } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
 export { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
-import { buildExecutionContinuation } from "./execution-continuation.js";
+import { buildExecutionContinuation, StaleExecutionContinuationError } from "./execution-continuation.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 import { PROJECT_REPOSITORIES_DIR, readGitWorkspaceSnapshot } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { isWorkspaceGitScanError, WorkspaceGitScanError, WORKSPACE_GIT_SCAN_ERROR_CODES } from "./workspace-git-operation-scheduler.js";
@@ -3423,6 +3425,21 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
         'error', left(${heartbeatRuns.resultJson} ->> 'error', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'stdout', left(${heartbeatRuns.resultJson} ->> 'stdout', ${HEARTBEAT_RUN_RESULT_OUTPUT_MAX_CHARS}),
         'stderr', left(${heartbeatRuns.resultJson} ->> 'stderr', ${HEARTBEAT_RUN_RESULT_OUTPUT_MAX_CHARS}),
+        'workspaceRestoreFailure', case when ${heartbeatRuns.resultJson} ->> 'workspaceRestoreFailure'
+          in ('restore_permission_denied', 'restore_lock_timeout', 'restore_unsafe_archive', 'restore_failed')
+          then ${heartbeatRuns.resultJson} -> 'workspaceRestoreFailure' end,
+        'finalResponseRecorded', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'finalResponseRecorded') = 'boolean'
+          then ${heartbeatRuns.resultJson} -> 'finalResponseRecorded' end,
+        'executionBeforeRestore', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'executionBeforeRestore') = 'object'
+          then jsonb_strip_nulls(jsonb_build_object(
+            'errorCode', left(${heartbeatRuns.resultJson} #>> '{executionBeforeRestore,errorCode}', 128),
+            'exitCode', case when jsonb_typeof(${heartbeatRuns.resultJson} #> '{executionBeforeRestore,exitCode}') = 'number'
+              and length(${heartbeatRuns.resultJson} #>> '{executionBeforeRestore,exitCode}') < 16
+              then ${heartbeatRuns.resultJson} #> '{executionBeforeRestore,exitCode}' end,
+            'signal', left(${heartbeatRuns.resultJson} #>> '{executionBeforeRestore,signal}', 50),
+            'timedOut', case when jsonb_typeof(${heartbeatRuns.resultJson} #> '{executionBeforeRestore,timedOut}') = 'boolean'
+              then ${heartbeatRuns.resultJson} #> '{executionBeforeRestore,timedOut}' end
+          )) end,
         'stdoutTruncated', case
           when length(${heartbeatRuns.resultJson} ->> 'stdout') > ${HEARTBEAT_RUN_RESULT_OUTPUT_MAX_CHARS}
             then to_jsonb(true)
@@ -8095,6 +8112,12 @@ export async function buildPaperclipWakePayload(input: {
       : [],
     childIssueSummaryTruncated:
       input.contextSnapshot.childIssueSummaryTruncated === true,
+    dispositionRepair: input.contextSnapshot.legacyDispositionEpisode ? {
+      attempt: input.contextSnapshot.dispositionRepairAttempt,
+      maxAttempts: input.contextSnapshot.dispositionRepairMaxAttempts,
+      sourceRunId: input.contextSnapshot.retryOfRunId,
+      instruction: input.contextSnapshot.dispositionRepairInstruction,
+    } : null,
     livenessContinuation:
       readNonEmptyString(input.contextSnapshot.livenessContinuationState) ||
       readNonEmptyString(
@@ -9482,6 +9505,12 @@ export function heartbeatService(
       const result = await scheduleBoundedRetryForRun(run, agent);
       return result.outcome === "scheduled" ? result.run : null;
     },
+    // Mirrors scheduleBoundedRetryForRun's transient budget check: a failed
+    // or interrupted run that has already consumed every bounded transient
+    // attempt cannot be retried again through this lane.
+    transientRetryBudgetSpent: (run) =>
+      executionFailureRetryCount(run) >=
+      BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
   });
   const runDispatch = createRunDispatch(db);
 
@@ -15205,12 +15234,8 @@ export function heartbeatService(
         opts?.maxAttempts ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
       ),
     );
-    const nextAttempt =
-      (retryReason === WORKSPACE_BUSY_RETRY_REASON ||
-      retryReason === AI_CONNECTION_BUSY_RETRY_REASON ||
-      retryReason === MAX_TURN_CONTINUATION_RETRY_REASON
-        ? (run.scheduledRetryAttempt ?? 0)
-        : executionFailureRetryCount(run)) + 1;
+    const consumedAttempts = executionRetryAttemptCount(run, retryReason);
+    const nextAttempt = consumedAttempts + 1;
     const computedBaseSchedule =
       opts?.delayMs != null
         ? nextAttempt <= maxAttempts
@@ -15250,14 +15275,14 @@ export function heartbeatService(
     if (!baseSchedule) {
       const exhaustion = {
         retryReason,
-        scheduledRetryAttempt: run.scheduledRetryAttempt ?? 0,
+        scheduledRetryAttempt: consumedAttempts,
         maxAttempts,
       };
       await appendRunEvent(run, {
         eventType: "lifecycle",
         stream: "system",
         level: "warn",
-        message: `Bounded retry exhausted after ${run.scheduledRetryAttempt ?? 0} scheduled attempts; no further automatic retry will be queued`,
+        message: `Bounded retry exhausted after ${consumedAttempts} scheduled attempts; no further automatic retry will be queued`,
         payload: exhaustion,
         retryExhaustion: exhaustion,
       });
@@ -15266,7 +15291,7 @@ export function heartbeatService(
           run,
           issueId,
           attempt: Math.min(
-            run.scheduledRetryAttempt ?? maxAttempts,
+            consumedAttempts,
             maxAttempts,
           ),
           maxAttempts,
@@ -15397,6 +15422,7 @@ export function heartbeatService(
     const retryContextSnapshot: Record<string, unknown> = withRecoveryContext(
       {
         ...contextSnapshot,
+        executionRetryAccounting: accountingForScheduledRetry(run, retryReason, schedule.attempt),
         retryOfRunId: run.id,
         wakeReason,
         retryReason,
@@ -18049,6 +18075,7 @@ export function heartbeatService(
             status: issues.status,
             title: issues.title,
             description: issues.description,
+            workMode: issues.workMode,
           })
           .from(issues)
           .where(
@@ -22100,6 +22127,8 @@ export function heartbeatService(
           selectedEnvironmentId,
           localEnvironmentId: localEnvironment.id,
           adapterType: agent.adapterType,
+          adapterConfig: parseObject(agent.adapterConfig),
+          admittedLifecycleMode: persistedNativeExecutionInput?.session.lifecyclePolicy.mode,
           issueId: issueId ?? null,
           heartbeatRunId: run.id,
           agentId: agent.id,
@@ -22265,6 +22294,19 @@ export function heartbeatService(
           ))
         )
           return { dispatched: false };
+        const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
+        if (repairBlock) {
+          const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
+            finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
+            error: `Disposition repair suppressed: ${repairBlock}`,
+          });
+          if (cancelled.updated) {
+            await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
+            await releaseIssueExecutionAndPromote(cancelled.run!, { suppressImmediateRecovery: true });
+            await finalizeAgentStatus(run.agentId, "cancelled");
+          }
+          return { dispatched: false };
+        }
         if (
           !issueId ||
           (!isResolvedInteractionContinuationWakeContext(context) &&
@@ -23250,9 +23292,10 @@ export function heartbeatService(
           // Other managed harnesses still require per-turn credential cleanup.
           const supportsManagedWarmSession = agent.adapterType === "paperclip_runner" &&
             nativeRuntimeResolution.profile.backend === "codex_app_server";
-          const effectiveLifecyclePolicy = managedAiRuntime && !supportsManagedWarmSession
-            ? { mode: "per_turn" as const, idleTimeoutMs: null }
-            : environmentLifecyclePolicy ?? agentLifecyclePolicy;
+          const effectiveLifecyclePolicy = persistedNativeExecutionInput?.session.lifecyclePolicy ??
+            (managedAiRuntime && !supportsManagedWarmSession
+              ? { mode: "per_turn" as const, idleTimeoutMs: null }
+              : environmentLifecyclePolicy ?? agentLifecyclePolicy);
           if (
             effectiveLifecyclePolicy.mode === "warm" &&
             executionTarget?.kind === "remote" &&
@@ -24382,9 +24425,9 @@ export function heartbeatService(
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
           }
-          // Adapter returned cleanly, which means its workspace-restore finally
-          // block also ran without throwing. Record the workspace_finalize
-          // barrier so dependents that share this executionWorkspace can wake.
+          adapterResult = applyWorkspaceRestoreFailure(adapterResult);
+          // A returned result can include a failed restore. Keep the workspace
+          // barrier closed until required files have been restored.
           // If recording the barrier itself fails, propagate as a run failure
           // rather than silently leaving dependents stranded behind a missing
           // finalize row.
@@ -24400,15 +24443,16 @@ export function heartbeatService(
                 eq(heartbeatRuns.status, "running"),
               ),
             );
-          await recordWorkspaceFinalize("succeeded");
+          const workspaceFinalizeStatus = hasWorkspaceRestoreFailure(adapterResult.resultJson) ? "failed" : "succeeded";
+          await recordWorkspaceFinalize(workspaceFinalizeStatus);
           if (adapterResult.nativeFinalization) {
             adapterResult.nativeFinalization.workspaceFinalizeStatus =
-              "succeeded";
+              workspaceFinalizeStatus;
             try {
               const finalized = await finalizeNativeRun({
                 db,
                 runId: run.id,
-                workspaceFinalizeStatus: "succeeded",
+                workspaceFinalizeStatus,
                 preserveProviderAttempt: Boolean(nativeWorkspaceSync),
               });
               await dispatchPendingNativeStatusWakeups({
@@ -25170,18 +25214,19 @@ export function heartbeatService(
                 .resumeSessionGoalHeartbeat === true,
           });
           if (!conversationSettled) {
-          await handleRunLivenessContinuation(livenessRun);
-          await handleIssueReviewPathDisposition(livenessRun);
-          await handleSuccessfulRunHandoff(
-            issueCommentPolicyResult.outcome === "retry_queued" ||
-              issueCommentPolicyResult.outcome === "retry_exhausted"
-              ? {
-                  ...livenessRun,
-                  issueCommentStatus: issueCommentPolicyResult.outcome,
-                }
-              : livenessRun,
-            agent,
-          );
+            await handleIssueReviewPathDisposition(livenessRun);
+            if (livenessRun.runtimeMode !== "native") {
+              await recovery.reconcileLegacyContinuation(livenessRun.id);
+            } else {
+              await handleRunLivenessContinuation(livenessRun);
+              await handleSuccessfulRunHandoff(
+                issueCommentPolicyResult.outcome === "retry_queued" ||
+                  issueCommentPolicyResult.outcome === "retry_exhausted"
+                  ? { ...livenessRun, issueCommentStatus: issueCommentPolicyResult.outcome }
+                  : livenessRun,
+                agent,
+              );
+            }
           }
           if (
             outcome === "succeeded" &&
@@ -25637,6 +25682,15 @@ export function heartbeatService(
                 ? outerErr.reason
                 : "adopted_runner_authentication_timeout",
           }).catch(() => undefined);
+      } else if (outerErr instanceof StaleExecutionContinuationError) {
+        // The queued continuation became obsolete before adapter dispatch.
+        // Use cancellation settlement so wakeup, issue ownership, agent state,
+        // and notifications agree; do not retry work for the previous owner.
+        await cancelRunInternal(run.id, outerErr.code, {
+          errorCode: outerErr.code,
+          eventMessage: "stale execution continuation cancelled before dispatch",
+          suppressImmediateRecovery: true,
+        });
       } else if (isWorkspaceBusyDeferral(outerErr)) {
         // Expected contention on a shared project workspace, not a
         // failure: park the run as a bounded scheduled retry and leave the
@@ -26339,7 +26393,19 @@ export function heartbeatService(
     };
 
     const schedulingSuppression = await getSchedulingSuppression();
-    if (schedulingSuppression.suppressed) {
+    // A task drain holds ADMISSION, not the request. The drain is a
+    // process-local pre-restart hold, so a wake that arrives while it is
+    // active still names real work that must run once the process comes
+    // back: leave it in the durable queue and let the dispatch-side checks
+    // (startNextQueuedRunForAgent / executeRun) keep it from starting until
+    // the drain lifts or the restart clears it. Writing it as `skipped`
+    // here dropped the wake permanently — an accepted plan whose
+    // continuation wake landed mid-drain left its issue in `todo` with no
+    // run and no path until a person noticed.
+    if (
+      schedulingSuppression.suppressed &&
+      schedulingSuppression.reason !== "task_drain"
+    ) {
       await writeSkippedHeartbeatRequest("heartbeat.scheduling_suppressed", {
         reason: schedulingSuppression.reason,
       });
@@ -26921,6 +26987,7 @@ export function heartbeatService(
           }
 
           let reconciledSourceRunId: string | null = null;
+          let reconciledRestoreRetryCount: number | null = null;
           if (executionReconciliationWake) {
             const actionId = readNonEmptyString(
               enrichedContextSnapshot.recoveryActionId,
@@ -27024,6 +27091,15 @@ export function heartbeatService(
             }
             if (action.evidence.continuationDelivery !== "pending")
               return { kind: "skipped" as const };
+            const [reconciledRun] = await tx.select().from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.id, sourceRunId),
+            ));
+            if (hasWorkspaceRestoreFailure(reconciledRun?.resultJson)) {
+              if ((readNonEmptyString(decision.workspaceRepairEvidence)?.length ?? 0) < 20)
+                return { kind: "skipped" as const };
+              // Repair does not reset the remaining automatic retry budget.
+              reconciledRestoreRetryCount = executionFailureRetryCount(reconciledRun!);
+            }
             reconciledSourceRunId = sourceRunId;
           }
 
@@ -27970,6 +28046,10 @@ export function heartbeatService(
               ...(reconciledSourceRunId
                 ? { retryOfRunId: reconciledSourceRunId }
                 : {}),
+              ...(reconciledRestoreRetryCount !== null ? {
+                scheduledRetryAttempt: reconciledRestoreRetryCount,
+                scheduledRetryReason: "transient_failure",
+              } : {}),
             })
             .returning()
             .then((rows) => rows[0]);
