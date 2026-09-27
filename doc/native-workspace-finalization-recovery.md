@@ -14,7 +14,10 @@ reserved for the duration of copyback and closed when it settles; even a one-con
 receipt. Losing the lock connection does not prove physical copyback stopped:
 a contender still refuses a receipt whose controller is alive. The original
 callback joins before its token is released, and publication checks the lock
-connection and token. Graceful completion clears the receipt. A controller that
+connection and token. Graceful completion clears the receipt. If that cleanup write fails after the
+callback joins, only the same exact controller boot retains positive in-process
+join evidence and may resume after reconnecting; an unknown token or a new boot
+does not inherit that authority. A controller that
 has exited on the same host can be recovered automatically only when a durable
 successful workspace barrier proves its copyback finished. A dead parent can
 leave tar/Git children alive, so incomplete copyback requires operator stop

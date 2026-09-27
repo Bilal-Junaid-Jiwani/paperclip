@@ -10,8 +10,13 @@ import {
 } from "./native-restart-recovery.js";
 
 const OWNER_KEY = "nativeWorkspaceFinalizationOwner";
+const activeOwnerTokens = new Set<string>();
+// Positive same-boot evidence, retained only when durable cleanup could not be
+// confirmed. Absence from the active set alone never proves another token joined.
+const joinedOwnerTokens = new Set<string>();
 type Owner = {
   token: string;
+  controllerBootId?: string;
   hostname: string;
   pid: number;
   processStartedAt: string;
@@ -51,7 +56,7 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
 ): Promise<{ acquired: false } | { acquired: true; value: T }> {
   const identity = await currentNativeControllerIdentity();
   const owner: Owner = {
-    token: randomUUID(), hostname: os.hostname(), pid: identity.pid,
+    token: randomUUID(), controllerBootId: identity.bootId, hostname: os.hostname(), pid: identity.pid,
     processStartedAt: identity.processStartedAt.toISOString(),
   };
   const scope = and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.runtimeMode, "native"));
@@ -66,8 +71,8 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
       const [run] = await input.db.select({ profile: heartbeatRuns.runnerProfileJson, issueId: heartbeatRuns.nativeIssueId, agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(scope).limit(1);
       if (!run) throw new Error("native_workspace_finalization_binding_missing");
       const rawPrior = run.profile?.[OWNER_KEY];
+      const prior = readOwner(rawPrior);
       if (rawPrior != null) {
-        const prior = readOwner(rawPrior);
         const requireStopVerification = async () => {
           if (run.issueId) await issueRecoveryActionService(input.db).upsertSourceScoped({
             companyId: input.companyId, sourceIssueId: run.issueId,
@@ -82,27 +87,40 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
         };
         // A foreign host or malformed receipt cannot prove the old physical owner stopped.
         if (!prior || prior.hostname !== owner.hostname) return requireStopVerification();
-        const takeover = await evaluateNativeControllerTakeover({
-          owner: { leaseOwner: prior.token, leaseExpiresAt: new Date(0), controllerPid: prior.pid,
-            controllerProcessStartedAt: new Date(prior.processStartedAt) }, now: new Date(),
-        });
-        if (!takeover.allowed) return { acquired: false } as const;
-        // A dead parent may have orphaned tar/Git children. Only a durable
-        // completed-copyback barrier proves they joined; otherwise board proof
-        // is required even on the same host. Both callers reuse this barrier.
-        const [completedCopyback] = await input.db.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
-          eq(workspaceOperations.companyId, input.companyId),
-          eq(workspaceOperations.heartbeatRunId, input.runId),
-          eq(workspaceOperations.issueId, run.issueId!),
-          eq(workspaceOperations.phase, "workspace_finalize"),
-          eq(workspaceOperations.status, "succeeded"),
-        )).limit(1);
-        if (!completedCopyback) return requireStopVerification();
+        const knownJoinedHere = prior.controllerBootId === identity.bootId
+          && prior.pid === identity.pid && joinedOwnerTokens.has(prior.token)
+          && !activeOwnerTokens.has(prior.token);
+        if (!knownJoinedHere) {
+          const takeover = await evaluateNativeControllerTakeover({
+            owner: { leaseOwner: prior.token, leaseExpiresAt: new Date(0), controllerPid: prior.pid,
+              controllerProcessStartedAt: new Date(prior.processStartedAt) }, now: new Date(),
+          });
+          if (!takeover.allowed) return { acquired: false } as const;
+          // A dead parent may have orphaned tar/Git children. Only a durable
+          // completed-copyback barrier proves they joined; otherwise board proof
+          // is required even on the same host. Both callers reuse this barrier.
+          const [completedCopyback] = await input.db.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
+            eq(workspaceOperations.companyId, input.companyId),
+            eq(workspaceOperations.heartbeatRunId, input.runId),
+            eq(workspaceOperations.issueId, run.issueId!),
+            eq(workspaceOperations.phase, "workspace_finalize"),
+            eq(workspaceOperations.status, "succeeded"),
+          )).limit(1);
+          if (!completedCopyback) return requireStopVerification();
+        }
       }
-      await input.db.update(heartbeatRuns).set({
-        runnerProfileJson: sql`jsonb_set(coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb), array[${OWNER_KEY}], ${JSON.stringify(owner)}::jsonb)`,
-      }).where(scope);
+      // Claim before the potentially ambiguous write so finally can remove
+      // only our token even if the server committed but its response was lost.
+      activeOwnerTokens.add(owner.token);
       claimed = true;
+      const [claimedRun] = await input.db.update(heartbeatRuns).set({
+        runnerProfileJson: sql`jsonb_set(coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb), array[${OWNER_KEY}], ${JSON.stringify(owner)}::jsonb)`,
+      }).where(and(scope, prior
+        ? sql`${heartbeatRuns.runnerProfileJson}->${OWNER_KEY}->>'token' = ${prior.token}`
+        : sql`${heartbeatRuns.runnerProfileJson}->>${OWNER_KEY} is null`
+      )).returning({ id: heartbeatRuns.id });
+      if (!claimedRun) return { acquired: false } as const;
+      if (prior) joinedOwnerTokens.delete(prior.token);
       const ownership: NativeWorkspaceFinalizationOwnership = {
         token: owner.token,
         assertHeld: async () => {
@@ -116,6 +134,7 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
           }
         },
       };
+      await ownership.assertHeld();
       actionPromise = action(ownership);
       const value = await actionPromise;
       await ownership.assertHeld();
@@ -126,9 +145,17 @@ export async function withNativeWorkspaceFinalizationOwnership<T>(
     // callback settles. Join that callback before releasing its durable fence.
     await actionPromise?.catch(() => undefined);
     if (claimed) {
-      await input.db.update(heartbeatRuns).set({
-        runnerProfileJson: sql`coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) - ${OWNER_KEY}`,
-      }).where(owned).catch(() => undefined);
+      activeOwnerTokens.delete(owner.token);
+      joinedOwnerTokens.add(owner.token);
+      try {
+        await input.db.update(heartbeatRuns).set({
+          runnerProfileJson: sql`coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) - ${OWNER_KEY}`,
+        }).where(owned);
+        joinedOwnerTokens.delete(owner.token);
+      } catch {
+        // A reconnect in this exact controller boot can use the positive join
+        // receipt. A new boot still needs durable barrier or operator proof.
+      }
     }
   }
 }

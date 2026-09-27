@@ -220,6 +220,30 @@ describe("native workspace finalization recovery", () => {
       .toEqual({ acquired: true, value: "recovered" });
   });
 
+  it("recovers its own joined copyback receipt after the application pool disconnects during cleanup", async () => {
+    const seeded = await seedRun({ executionWorkspaceId: randomUUID(), title: "Reconnect joined copyback" });
+    const interruptedDb = createDb(temporary.connectionString);
+    let joined = false;
+    await expect(withNativeWorkspaceFinalizationOwnership({ db: interruptedDb, companyId, runId: seeded.runId }, async () => {
+      await fs.writeFile(path.join(workspaceRoot, "joined-copyback.txt"), "durable work");
+      joined = true;
+      await interruptedDb.$client.end({ timeout: 1 });
+    })).rejects.toThrow();
+    expect(joined).toBe(true);
+    const [beforeReconnect] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    const receipt = beforeReconnect.runnerProfileJson?.nativeWorkspaceFinalizationOwner as Record<string, unknown>;
+    expect(receipt).toBeTruthy();
+    for (const unknown of [{ ...receipt, controllerBootId: randomUUID() }, { ...receipt, token: randomUUID() }]) {
+      await db.update(heartbeatRuns).set({ runnerProfileJson: { ...beforeReconnect.runnerProfileJson, nativeWorkspaceFinalizationOwner: unknown } })
+        .where(eq(heartbeatRuns.id, seeded.runId));
+      expect(await withNativeWorkspaceFinalizationOwnership({ db, companyId, runId: seeded.runId }, async () => "must not run"))
+        .toEqual({ acquired: false });
+    }
+    await db.update(heartbeatRuns).set({ runnerProfileJson: beforeReconnect.runnerProfileJson }).where(eq(heartbeatRuns.id, seeded.runId));
+    expect(await withNativeWorkspaceFinalizationOwnership({ db: createDb(temporary.connectionString), companyId, runId: seeded.runId }, async () => "resumed"))
+      .toEqual({ acquired: true, value: "resumed" });
+  });
+
   it("never steals pending copyback from an orphan child after its controller is killed", async () => {
     const seeded = await seedRun({ executionWorkspaceId: randomUUID(), title: "Orphan copyback child" });
     const output = path.join(workspaceRoot, "orphan-copyback.txt");
