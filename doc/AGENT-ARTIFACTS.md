@@ -48,11 +48,12 @@ The command prints issue-safe markdown links for the final task comment.
 ## Task artifact presentation
 
 While a task is open, a new agent attachment, work product, or document opens
-the task's Artifacts tab and reveals the side panel (or mobile drawer). This
-uses stored object IDs, so it works with either runner. Uploading a file and
-registering its work product counts as one arrival. Existing history, revisions,
-and repeated query refreshes preserve the user's tab selection. Plans retain
-their existing Plan-tab behavior; unregistered user input attachments remain in
+the task's Artifacts tab and reveals the side panel (or mobile drawer), without
+changing the selected tab or a workspace-file URL. Artifacts already present on
+initial load also open the tab. This uses stored object IDs, so it works with
+either runner. Uploading a file and registering its work product counts as one
+arrival. Revisions and repeated query refreshes do not reopen a dismissed tab.
+Plans retain their existing Plan-tab behavior; unregistered user input attachments remain in
 the conversation.
 
 ## Uploaded Artifacts vs Workspace Files
