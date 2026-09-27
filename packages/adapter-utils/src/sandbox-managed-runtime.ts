@@ -45,6 +45,7 @@ import {
   type SyncOperationTask,
 } from "./sync-operation-schedule.js";
 import type { RuntimeSpanRunner } from "./acpx-engine/startup-timing.js";
+import { withWorkspaceRestoreDiagnostics } from "./workspace-restore-diagnostics.js";
 
 const execFile = promisify(execFileCallback);
 const SANDBOX_WORKSPACE_HEAVY_DIR_NAMES = [
@@ -930,18 +931,66 @@ export async function mirrorDirectory(
   }
 }
 
-async function copySelectedWorkspaceEntries(input: {
+interface WorkspaceSourceRoot {
   sourceDir: string;
+  dev: number;
+  ino: number;
+}
+
+async function captureWorkspaceSourceRoot(localDir: string): Promise<WorkspaceSourceRoot> {
+  const sourceDir = await fs.realpath(localDir);
+  const stats = await fs.lstat(sourceDir);
+  if (!stats.isDirectory()) throw new Error("Workspace overlay root is not a directory");
+  return { sourceDir, dev: stats.dev, ino: stats.ino };
+}
+
+async function copySelectedWorkspaceEntries(input: {
+  sourceRoot: WorkspaceSourceRoot;
   targetDir: string;
   relativePaths: string[];
   exclude: string[];
 }): Promise<void> {
   await fs.mkdir(input.targetDir, { recursive: true });
+  const { sourceDir, dev, ino } = input.sourceRoot;
+  const assertSourceRoot = async () => {
+    const current = await fs.lstat(sourceDir);
+    if (!current.isDirectory() || current.dev !== dev || current.ino !== ino) {
+      throw new Error("Workspace overlay root directory changed during staging");
+    }
+  };
+  await assertSourceRoot();
   for (const relative of input.relativePaths) {
     if (shouldExcludePath(relative, input.exclude)) continue;
-    const sourceStats = await fs.lstat(path.join(input.sourceDir, relative)).catch(() => null);
-    if (!sourceStats) continue;
-    await copyWorkspaceEntry(input.sourceDir, input.targetDir, relative);
+    const sourcePath = path.join(sourceDir, relative);
+    const parentSegments = path.relative(sourceDir, path.dirname(sourcePath)).split(path.sep).filter(Boolean);
+    const assertParentDirectory = async () => {
+      // Git selected this path before staging. A replaced ancestor must not
+      // redirect the copy through a symlink, even to another workspace folder.
+      // Inspect types instead of comparing realpath spelling: case-insensitive
+      // filesystems can resolve Git's indexed casing to a renamed directory.
+      let parentPath = sourceDir;
+      for (const segment of parentSegments) {
+        if (segment === "..") throw new Error(`Workspace overlay directory escapes its root: ${relative}`);
+        parentPath = path.join(parentPath, segment);
+        if (!(await fs.lstat(parentPath)).isDirectory()) {
+          throw new Error(`Workspace overlay ancestor is not a directory: ${relative}`);
+        }
+      }
+    };
+    // Include root-level entries, and do not treat a missing root as an
+    // ordinary source file that disappeared after the snapshot.
+    await assertSourceRoot();
+    try {
+      await assertParentDirectory();
+      await fs.lstat(sourcePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
+    await copyWorkspaceEntry(sourceDir, input.targetDir, relative);
+    // Do not upload the staged tree if an ancestor changed during the copy.
+    await assertSourceRoot();
+    await assertParentDirectory();
   }
 }
 
@@ -1130,6 +1179,12 @@ export async function prepareSandboxManagedRuntime(input: {
   // span, because the teardown runs the restore inside that span.
   const runStepSpan = <T>(name: string, work: () => Promise<T>): Promise<T> =>
     input.runtimeSpan ? input.runtimeSpan(name, work) : work();
+
+  // Resolve an existing workspace alias once, before reading its snapshot.
+  // All subsequent work uses that root, so retargeting the alias cannot select
+  // another repository. Staging also verifies the captured directory identity.
+  const workspaceRoot = syncWorkspace ? await captureWorkspaceSourceRoot(input.workspaceLocalDir) : null;
+  if (workspaceRoot) input = { ...input, workspaceLocalDir: workspaceRoot.sourceDir };
 
   // The git enumeration (`git status --ignored`, the HEAD diffs, `ls-files`).
   // It reads git's own bookkeeping to decide what to include/exclude, so it is
@@ -1403,7 +1458,7 @@ export async function prepareSandboxManagedRuntime(input: {
                 : input.workspaceLocalDir;
               if (gitSnapshot) {
                 await copySelectedWorkspaceEntries({
-                  sourceDir: input.workspaceLocalDir,
+                  sourceRoot: workspaceRoot!,
                   targetDir: workspaceArchiveDir,
                   relativePaths: gitSnapshot.overlayPaths,
                   exclude: workspaceArchiveExclude,
@@ -1674,7 +1729,7 @@ export async function prepareSandboxManagedRuntime(input: {
       // tasks never share scratch state.
       if (syncWorkspace) {
         outboundTasks.push(() =>
-          runStepSpan("restore.workspace", async () => {
+          withWorkspaceRestoreDiagnostics("workspace", () => runStepSpan("restore.workspace", async () => {
             // Each repository owns its Git history and merge. The parent baseline also
             // records child files so restart recovery has their original merge inputs.
             for (const repository of repositories) {
@@ -1900,7 +1955,7 @@ export async function prepareSandboxManagedRuntime(input: {
                 }
               }
             });
-          }),
+          }), restoreSink),
         );
       }
 
@@ -1912,15 +1967,17 @@ export async function prepareSandboxManagedRuntime(input: {
         const assetRestore = asset.restore;
         const assetKey = asset.key;
         outboundTasks.push(() =>
-          runStepSpan(`restore.asset.${assetKey}`, async () => {
-            await withTempDir("paperclip-sandbox-restore-", async (tempDir) => {
-              await assetRestore({
-                assetDir: path.posix.join(runtimeRootDir, assetKey),
-                readFile: async (remotePath) => toBuffer(await input.client.readFile(remotePath)),
-                tempDir,
+          withWorkspaceRestoreDiagnostics(
+            "asset",
+            () => runStepSpan(`restore.asset.${assetKey}`, async () => {
+              await withTempDir("paperclip-sandbox-restore-", async (tempDir) => {
+                await assetRestore({
+                  assetDir: path.posix.join(runtimeRootDir, assetKey),
+                  readFile: async (remotePath) => toBuffer(await input.client.readFile(remotePath)),
+                  tempDir,
+                });
               });
-            });
-          }),
+            }), restoreSink),
         );
       }
 
