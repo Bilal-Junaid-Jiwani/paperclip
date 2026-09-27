@@ -41,6 +41,7 @@ describe("workspace restore merge", () => {
 
     const snapshot = await captureDirectorySnapshot(rootDir, { exclude: [] });
     const serialized = serializeDirectorySnapshot(snapshot);
+    if (serialized.version !== 1) throw new Error("Expected legacy in-memory snapshot");
     const restored = parseDirectorySnapshot(serialized);
 
     expect(serialized.entries.map(([relativePath]) => relativePath)).toEqual([

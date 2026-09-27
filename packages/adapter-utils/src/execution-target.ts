@@ -267,6 +267,7 @@ export interface PreparedAdapterExecutionTargetRuntime {
     baseline: DirectorySnapshot;
     gitSnapshot: GitWorkspaceSnapshot | null;
   } | null;
+  cleanupWorkspaceSnapshot?(): Promise<void>;
   restoreWorkspace(onProgress?: RuntimeProgressSink): Promise<void>;
 }
 
@@ -1522,6 +1523,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
     additionalSourceDirs: prepared.additionalSourceDirs,
     additionalSourceFailures: prepared.additionalSourceFailures,
     workspaceSyncSnapshot: prepared.workspaceSyncSnapshot,
+    cleanupWorkspaceSnapshot: prepared.cleanupWorkspaceSnapshot,
     restoreWorkspace: prepared.restoreWorkspace,
   };
 }
