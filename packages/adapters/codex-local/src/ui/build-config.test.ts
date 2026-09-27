@@ -36,6 +36,20 @@ function makeValues(overrides: Partial<CreateConfigValues> = {}): CreateConfigVa
 }
 
 describe("buildCodexLocalConfig", () => {
+  it.each(["", "grok-4.7-custom"])("retains the Grok harness and its model when normalizing runner fields (%s)", (model) => {
+    const values = makeValues({
+      model,
+      adapterSchemaValues: { provider: "acpx", acpxAgent: "grok", acpxPermissionMode: "approve-paperclip" },
+    });
+    expect(buildPaperclipRunnerConfig(values)).toMatchObject({
+      provider: "acpx",
+      acpxAgent: "grok",
+      model: model || "grok-4.7",
+      acpxPermissionMode: "approve-paperclip",
+    });
+    expect(values.adapterSchemaValues?.acpxAgent).toBe("grok");
+  });
+
   it("omits engine for the auto default so runtime fallback remains available", () => {
     const config = buildCodexLocalConfig(makeValues({ codexEngine: "auto" }));
 
