@@ -262,6 +262,7 @@ export function TaskSidePanel({
   const userInteractedRef = useRef(restoredRef.current?.userInteracted ?? false);
   const autoPlanHandledRef = useRef(restoredRef.current?.autoPlanHandled ?? false);
   const handledArtifactsRequestRef = useRef<number | undefined>(undefined);
+  const handledDocumentRequestRef = useRef<number | undefined>(undefined);
   const initialState = useMemo(() => {
     const restored = restoredRef.current?.state;
     let tabs = restored?.tabs ?? (issue.conversationAgentId ? [taskPanelArtifactsTab()] : [taskPanelPropertiesTab()]);
@@ -348,13 +349,15 @@ export function TaskSidePanel({
   }, [controller.openTab, planDocument]);
 
   useEffect(() => {
-    if (!documentDeepLink) return;
+    if (!documentDeepLink || handledDocumentRequestRef.current === documentDeepLink.requestId) return;
     if (
       documentDeepLink.documentKey === "plan" &&
       planDocument === null
     ) return;
     const document = documents.find((candidate) => candidate.key === documentDeepLink.documentKey);
     const label = document ? documentDisplayTitle(document) : documentDeepLink.documentKey === "plan" ? "Plan" : documentDeepLink.documentKey;
+    // A refresh must not replay a link after the user selects another tab.
+    handledDocumentRequestRef.current = documentDeepLink.requestId;
     controller.openTab(taskPanelDocumentTab(documentDeepLink.documentKey, label));
   }, [controller.openTab, documentDeepLink, documents, planDocument]);
 

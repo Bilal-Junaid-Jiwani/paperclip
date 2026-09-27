@@ -222,6 +222,20 @@ describe("TaskSidePanel", () => {
     expect(container.querySelectorAll('[data-side-panel-tab-target="artifacts"]')).toHaveLength(1);
   });
 
+  it("handles each document link once without overriding later manual selection", async () => {
+    fixture.documents = [issueDocument("agents", "AGENTS.md")];
+    const documentDeepLink = { requestId: 1, documentKey: "agents" };
+    await render(panel({ documentDeepLink }));
+    await act(async () => container.querySelector<HTMLButtonElement>("#side-panel-tab-properties")?.click());
+    fixture.documents = [...fixture.documents, issueDocument("skill", "SKILL.md")];
+    await render(panel({ documentDeepLink: { ...documentDeepLink }, artifactsOpenRequestId: 1 }));
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Properties");
+    expect(container.querySelectorAll('[data-side-panel-tab-target="artifacts"]')).toHaveLength(1);
+
+    await render(panel({ documentDeepLink: { ...documentDeepLink, requestId: 2 } }));
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("AGENTS.md");
+  });
+
   it("uses the approved pre-rebase tab appearance for Streamlined UI", async () => {
     await render(panel({ streamlinedTabs: true }));
     const propertiesTab = container.querySelector<HTMLElement>('[data-side-panel-tab-target="properties"]');
