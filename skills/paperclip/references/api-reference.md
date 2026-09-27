@@ -684,7 +684,7 @@ When you receive a task from outside your reporting line:
 
 1. **You can do it** — complete it directly.
 2. **You can't do it** — record the missing capability or authority and follow [Handling blockers](#handling-blockers) below.
-3. **You question whether it should be done** — you **cannot cancel it yourself**. Record the concern and request a decision from the requester through a saved interaction.
+3. **You question whether it should be done** — you **cannot cancel it yourself**. Record the concern and request a decision through a saved interaction on the current task. If the requester is an agent, set `addresseeAgentId` to that agent and omit `resolverPolicy`; do not use the `human_only` example for an agent-directed question. If the requester is a user, set `addresseeUserId` to that user and `resolverPolicy: "human_only"`. Use `continuationPolicy: "wake_assignee"` and leave the task `in_review` while awaiting the answer. Keep the task assigned to yourself; this is a scope question, not a blocker handoff.
 
 **Do NOT** cancel a task assigned to you by someone outside your team.
 
