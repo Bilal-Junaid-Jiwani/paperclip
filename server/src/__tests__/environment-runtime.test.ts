@@ -39,6 +39,7 @@ import {
 import * as sandboxProviderRuntime from "../services/sandbox-provider-runtime.ts";
 import * as environmentsModule from "../services/environments.ts";
 import { logger } from "../middleware/logger.ts";
+import { resolveRunnerEnvironmentForRun } from "../services/runner-environment-lifecycle.js";
 import { environmentService } from "../services/environments.ts";
 import { remoteExecutionHasStopped } from "../services/remote-execution-termination.ts";
 import { heartbeatService } from "../services/heartbeat.ts";
@@ -465,6 +466,55 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
 
     return { pluginId, companyId, agentId, environment, runId, executionWorkspaceId, reusableLease };
   }
+
+  it("acquires and resumes a reusable lease after a task changes from per-turn to warm", async () => {
+    const seeded = await seedReusablePluginSandboxLease("paperclip_runner");
+    await environmentService(db).releaseLease(seeded.reusableLease.id, "expired");
+    const environment = { ...seeded.environment, config: { ...seeded.environment.config, reuseLease: false } };
+    await environmentService(db).update(environment.id, { config: environment.config });
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId: seeded.companyId, title: "Lifecycle switch", status: "in_progress", assigneeAgentId: seeded.agentId });
+    let acquisitions = 0;
+    let warmProviderLeaseId = "";
+    const call = vi.fn(async (_pluginId: string, method: string, input: any) => {
+      if (method === "environmentAcquireLease") return {
+        providerLeaseId: `lifecycle-${++acquisitions}`, metadata: { remoteCwd: "/workspace" },
+      };
+      if (method === "environmentResumeLease") return {
+        providerLeaseId: warmProviderLeaseId, metadata: { remoteCwd: "/workspace" },
+      };
+      if (method === "environmentDestroyLease" || method === "environmentReleaseLease") return {
+        providerLeaseId: input.providerLeaseId, state: method === "environmentDestroyLease" ? "destroyed" : "stopped",
+      };
+      throw new Error(`Unexpected lifecycle method: ${method}`);
+    });
+    const runtime = environmentRuntimeService(db, { pluginWorkerManager: {
+      isRunning: () => true, call,
+      getWorker: () => ({ supportedMethods: ["environmentResumeLease", "environmentReleaseLease", "environmentDestroyLease"] }),
+    } as unknown as PluginWorkerManager });
+    const input = {
+      companyId: seeded.companyId, agentId: seeded.agentId, issueId,
+      adapterType: "paperclip_runner", persistedExecutionWorkspace: { id: seeded.executionWorkspaceId, mode: "shared_workspace" as const },
+    };
+    const cold = await runtime.acquireRunLease({ ...input, environment, heartbeatRunId: seeded.runId });
+    expect(cold.lease.leasePolicy).toBe("ephemeral");
+    await runtime.releaseRunLeases(seeded.runId, "released");
+    const warmEnvironment = resolveRunnerEnvironmentForRun(environment, "paperclip_runner", { lifecycleMode: "warm" });
+    const warmRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: warmRunId, companyId: seeded.companyId, agentId: seeded.agentId, status: "running" });
+    const warm = await runtime.acquireRunLease({ ...input, environment: warmEnvironment, heartbeatRunId: warmRunId });
+    warmProviderLeaseId = warm.lease.providerLeaseId!;
+    expect(warm.lease.leasePolicy).toBe("reuse_by_environment");
+    expect(warm.lease.executionWorkspaceId).toBe(seeded.executionWorkspaceId);
+    expect((await runtime.resolveCapabilities({ environment: warmEnvironment, lease: warm.lease })).reusableLeases).toBe(true);
+    await runtime.releaseRunLeases(warmRunId, "released", undefined, "stop_and_retain");
+    const nextRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: nextRunId, companyId: seeded.companyId, agentId: seeded.agentId, status: "running" });
+    const next = await runtime.acquireRunLease({ ...input, environment: warmEnvironment, heartbeatRunId: nextRunId });
+    expect(next.lease.providerLeaseId).toBe(warmProviderLeaseId);
+    expect(acquisitions).toBe(2);
+    expect((await environmentService(db).getById(environment.id))?.config.reuseLease).toBe(false);
+  });
 
   it.each(["stopped", "missing", "wrong-lease", "error"])(
     "startup cancellation is run-scoped and needs a matching receipt: %s",

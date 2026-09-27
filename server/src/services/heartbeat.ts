@@ -22127,6 +22127,8 @@ export function heartbeatService(
           selectedEnvironmentId,
           localEnvironmentId: localEnvironment.id,
           adapterType: agent.adapterType,
+          adapterConfig: parseObject(agent.adapterConfig),
+          admittedLifecycleMode: persistedNativeExecutionInput?.session.lifecyclePolicy.mode,
           issueId: issueId ?? null,
           heartbeatRunId: run.id,
           agentId: agent.id,
@@ -23290,9 +23292,10 @@ export function heartbeatService(
           // Other managed harnesses still require per-turn credential cleanup.
           const supportsManagedWarmSession = agent.adapterType === "paperclip_runner" &&
             nativeRuntimeResolution.profile.backend === "codex_app_server";
-          const effectiveLifecyclePolicy = managedAiRuntime && !supportsManagedWarmSession
-            ? { mode: "per_turn" as const, idleTimeoutMs: null }
-            : environmentLifecyclePolicy ?? agentLifecyclePolicy;
+          const effectiveLifecyclePolicy = persistedNativeExecutionInput?.session.lifecyclePolicy ??
+            (managedAiRuntime && !supportsManagedWarmSession
+              ? { mode: "per_turn" as const, idleTimeoutMs: null }
+              : environmentLifecyclePolicy ?? agentLifecyclePolicy);
           if (
             effectiveLifecyclePolicy.mode === "warm" &&
             executionTarget?.kind === "remote" &&

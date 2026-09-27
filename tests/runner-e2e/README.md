@@ -201,7 +201,8 @@ write endpoint rejects a send without creating work, and re-enables the same
 conversation with its remembered context. The company, credential, and native
 agent are fixture-provisioned. This qualifies the experimental-settings path,
 not native first-run onboarding: the current production wizard offers legacy
-adapters, and native API tools remain an independent opt-in.
+adapters. Native API tools are enabled by default, subject to the
+[operator controls](../../doc/runner-api-tools.md#default-availability-and-operator-controls).
 
 `followup-while-running` and `revise-while-running` send a second browser message
 while the provider runs a bounded command waiting for a fixture brief file.

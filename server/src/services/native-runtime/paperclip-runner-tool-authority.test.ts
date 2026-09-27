@@ -1,5 +1,5 @@
 import * as cloudIdentity from "../cloud-runtime-identity.js";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import {
@@ -32,6 +32,12 @@ describe("PaperclipRunnerToolAuthority", () => {
   const agentId = "00000000-0000-4000-8000-000000000102";
   const issueId = "00000000-0000-4000-8000-000000000103";
   const runId = "00000000-0000-4000-8000-000000000104";
+
+  beforeEach(() => {
+    vi.stubEnv("PAPERCLIP_RUNNER_API_TOOLS_ENABLED", undefined);
+    vi.stubEnv("PAPERCLIP_RUNNER_API_TOOLS_COMPANY_IDS", undefined);
+  });
+  afterEach(() => vi.unstubAllEnvs());
 
   beforeAll(async () => {
     temporary = await startEmbeddedPostgresTestDatabase(
@@ -91,7 +97,7 @@ describe("PaperclipRunnerToolAuthority", () => {
       issueId,
       runId,
     });
-    expect(authority.definitions()).toHaveLength(27);
+    expect(authority.definitions()).toHaveLength(30);
     const questions = authority.definitions().find(tool => tool.name === "request_human_input")!;
     expect(questions.description).toContain("ask only the next unanswered question");
     expect(questions.description).toContain("Never infer answers");
@@ -103,6 +109,7 @@ describe("PaperclipRunnerToolAuthority", () => {
       expect.arrayContaining([
         "connections_search",
         "connection_request", "create_project", "list_project_repositories", "list_projects",
+        "search_api", "call_api", "hire_agent",
         "get_task_context",
         "get_task_history",
         "search_tasks",
@@ -216,7 +223,7 @@ describe("PaperclipRunnerToolAuthority", () => {
     }
   });
 
-  it("preserves direct-chat file tools across the guarded API rollout", () => {
+  it("advertises API tools by default and preserves direct-chat file tools when disabled", () => {
     const previousEnabled = process.env.PAPERCLIP_RUNNER_API_TOOLS_ENABLED;
     const previousCompanies =
       process.env.PAPERCLIP_RUNNER_API_TOOLS_COMPANY_IDS;
@@ -240,15 +247,15 @@ describe("PaperclipRunnerToolAuthority", () => {
     try {
       delete process.env.PAPERCLIP_RUNNER_API_TOOLS_ENABLED;
       delete process.env.PAPERCLIP_RUNNER_API_TOOLS_COMPANY_IDS;
-      const disabledNames = createAuthority()
+      const defaultNames = createAuthority()
         .definitions()
         .map((tool) => tool.name);
-      expect(disabledNames).toEqual(
+      expect(defaultNames).toEqual(
         expect.arrayContaining(requiredChatFileTools),
       );
-      expect(disabledNames).not.toContain("search_api");
-      expect(disabledNames).not.toContain("call_api");
-      expect(disabledNames).not.toContain("hire_agent");
+      expect(defaultNames).toContain("search_api");
+      expect(defaultNames).toContain("call_api");
+      expect(defaultNames).toContain("hire_agent");
 
       process.env.PAPERCLIP_RUNNER_API_TOOLS_ENABLED = "true";
       process.env.PAPERCLIP_RUNNER_API_TOOLS_COMPANY_IDS = companyId;
@@ -268,6 +275,13 @@ describe("PaperclipRunnerToolAuthority", () => {
       expect(hireSchema.properties).toEqual(expect.objectContaining({ name: expect.any(Object), role: expect.any(Object) }));
       expect(hireSchema.properties).not.toHaveProperty("adapterConfig");
       expect(hireSchema.properties).not.toHaveProperty("env");
+
+      process.env.PAPERCLIP_RUNNER_API_TOOLS_ENABLED = "false";
+      const disabledNames = createAuthority().definitions().map((tool) => tool.name);
+      expect(disabledNames).toEqual(expect.arrayContaining(requiredChatFileTools));
+      for (const name of ["search_api", "call_api", "hire_agent"]) {
+        expect(disabledNames).not.toContain(name);
+      }
     } finally {
       if (previousEnabled === undefined) {
         delete process.env.PAPERCLIP_RUNNER_API_TOOLS_ENABLED;
