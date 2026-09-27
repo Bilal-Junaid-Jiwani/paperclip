@@ -1456,3 +1456,11 @@ Contracts reference the existing brief and answers instead of copying them again
 Resumed sessions keep the existing message-delta path; fresh sessions receive the
 full covered history. Stable wording and bounded references avoid adding another
 full brief on each comment, but provider cache hits must be measured separately.
+
+### Native finalization recovery display
+
+A native finalization retry uses the existing recovery record but does not imply
+that an agent turn is running. Task and inbox surfaces show recovery in progress
+only while its recorded retry is still due or its matching retry run is verified
+live. An expired or missing retry, exhausted budget, or board-owned failure shows
+recovery needed rather than “Observing active run.”

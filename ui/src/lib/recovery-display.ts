@@ -55,6 +55,7 @@ export type RecoveryDisplayInput = Pick<
   Partial<
     Pick<
       IssueRecoveryAction,
+      | "cause"
       | "ownerType"
       | "wakePolicy"
       | "evidence"
@@ -71,11 +72,6 @@ export function deriveRecoveryDisplayState(
   if (action.status === "resolved") return "resolved";
   if (action.status === "escalated") return "escalated";
   if (action.status === "cancelled") return "resolved";
-  if (action.kind === "active_run_watchdog") {
-    // Native terminal failures also use this kind. Board ownership means a
-    // human must choose recovery; it is not evidence of a still-running turn.
-    return action.ownerType === "board" ? "needed" : "observe_only";
-  }
   // A bounded retry lineage still holding a durable path is work the server will do on its
   // own. Shouting "recovery needed" over it would ask a human to fix something nobody has to
   // fix yet, so the calm tone is reserved for a lane with an attempt genuinely still coming.
@@ -88,6 +84,15 @@ export function deriveRecoveryDisplayState(
     maxAttempts: action.maxAttempts,
     timeoutAt: action.timeoutAt,
   }, context);
+  if (action.kind === "active_run_watchdog") {
+    // Native finalization shares the watchdog kind, but resumes a failed
+    // coordinator rather than observing a live agent turn. Preserve board
+    // ownership and only describe recovery as active while its retry is live.
+    if (action.ownerType === "board") return "needed";
+    if (lineage) return lineage.hasDurablePath ? "in_progress" : "needed";
+    if (action.cause?.startsWith("native_")) return "needed";
+    return "observe_only";
+  }
   if (lineage && lineage.lane !== "board" && lineage.hasDurablePath) return "in_progress";
   if (action.outcome === "delegated") return "in_progress";
   return "needed";

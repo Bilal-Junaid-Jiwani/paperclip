@@ -117,6 +117,59 @@ describe("deriveRecoveryDisplayState", () => {
     },
   );
 
+  describe("native finalization recovery", () => {
+    const now = Date.parse("2026-09-27T02:00:00.000Z");
+    const action = {
+      ...base,
+      kind: "active_run_watchdog" as const,
+      ownerType: "agent" as const,
+      cause: "native_finalization_invalid",
+      attemptCount: 1,
+      maxAttempts: 3,
+      evidence: { runId: "finalizing-run", coordinatorAttempt: 1 },
+      wakePolicy: {
+        kind: "resume_native_run",
+        runId: "finalizing-run",
+        notBefore: "2026-09-27T01:48:53.988Z",
+      },
+    };
+
+    it("shows the missed PAP-64 finalization retry as recovery needed", () => {
+      const state = deriveRecoveryDisplayState(action, { now });
+      expect(state).toBe("needed");
+      expect(recoveryChipLabel(state as "needed", action.kind)).toBe("Recovery needed");
+    });
+
+    it("describes a future finalization retry as recovery, not an active agent turn", () => {
+      expect(deriveRecoveryDisplayState({
+        ...action,
+        wakePolicy: { ...action.wakePolicy, notBefore: "2026-09-27T02:01:00.000Z" },
+      }, { now })).toBe("in_progress");
+    });
+
+    it("recognizes only the matching verified run for an overdue retry", () => {
+      expect(deriveRecoveryDisplayState(action, {
+        now, scheduledRetry: { runId: "finalizing-run", status: "running" },
+      })).toBe("in_progress");
+      expect(deriveRecoveryDisplayState(action, {
+        now, scheduledRetry: { runId: "different-run", status: "running" },
+      })).toBe("needed");
+    });
+
+    it.each([null, { kind: "resume_native_run" }, { kind: "resume_native_run", notBefore: "invalid" }])(
+      "does not claim observation without a usable finalization retry (%j)",
+      (wakePolicy) => {
+        expect(deriveRecoveryDisplayState({ ...action, wakePolicy }, { now })).toBe("needed");
+      },
+    );
+
+    it("keeps exhausted retries and board-owned failures actionable", () => {
+      const wakePolicy = { ...action.wakePolicy, notBefore: "2026-09-27T02:01:00.000Z" };
+      expect(deriveRecoveryDisplayState({ ...action, wakePolicy, attemptCount: 3 }, { now })).toBe("needed");
+      expect(deriveRecoveryDisplayState({ ...action, wakePolicy, ownerType: "board" }, { now })).toBe("needed");
+    });
+  });
+
   it("preserves observation for an agent-owned watchdog", () => {
     expect(
       deriveRecoveryDisplayState({

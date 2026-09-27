@@ -55,6 +55,7 @@ export interface RecoveryRetryLineage {
 const SOURCE_LANE_POLICY = "bounded_owner_disposition_repair";
 const RECOVERY_LANE_POLICY = "bounded_recovery_owner";
 const BOARD_LANE_POLICY = "board_escalation";
+const NATIVE_FINALIZATION_POLICY = "resume_native_run";
 
 /** Scheduled-run states that mean the parked attempt is actually in flight right now. */
 const LIVE_SCHEDULED_RUN_STATUSES = new Set(["queued", "running"]);
@@ -143,13 +144,14 @@ export function readRecoveryRetryLineage(
   const policy = asRecord(action.wakePolicy);
   if (!policy) return null;
   const type = asNonEmptyString(policy.type);
+  const nativeFinalization = policy.kind === NATIVE_FINALIZATION_POLICY;
   const preservesSourceAssignee = policy.preservesSourceAssignee === true;
   const evidence = asRecord(action.evidence) ?? {};
   const evidenceSourceAttempt = asCount(evidence.sourceAttemptCount);
   const evidenceSourceMaxAttempts = asCount(evidence.sourceMaxAttempts);
 
   let lane: RecoveryRetryLane;
-  if (type === SOURCE_LANE_POLICY) lane = "source_owner";
+  if (type === SOURCE_LANE_POLICY || nativeFinalization) lane = "source_owner";
   else if (type === RECOVERY_LANE_POLICY) lane = "recovery_owner";
   else if (
     type === BOARD_LANE_POLICY &&
@@ -160,8 +162,13 @@ export function readRecoveryRetryLineage(
 
   const attempt = asCount(policy.attempt) ?? asCount(action.attemptCount) ?? 0;
   const maxAttempts = asCount(policy.maxAttempts) ?? asCount(action.maxAttempts);
-  const scheduledRunId = asNonEmptyString(policy.scheduledRunId);
-  const storedRetryAt = asIsoDate(policy.retryAt) ?? asIsoDate(action.timeoutAt);
+  const scheduledRunId = asNonEmptyString(nativeFinalization ? policy.runId : policy.scheduledRunId);
+  // Native finalization resumes an existing coordinator; its scheduling fields
+  // differ from an agent wake. A retry without that run identity is not a path.
+  if (nativeFinalization && scheduledRunId === null) return null;
+  const storedRetryAt = nativeFinalization
+    ? asIsoDate(policy.notBefore)
+    : asIsoDate(policy.retryAt) ?? asIsoDate(action.timeoutAt);
   const exhausted = lane === "board" || (maxAttempts !== null && attempt >= maxAttempts);
   const nextRetryAt = exhausted ? null : storedRetryAt;
   const liveRunId = resolveLiveRunId(scheduledRunId, context?.scheduledRetry);
