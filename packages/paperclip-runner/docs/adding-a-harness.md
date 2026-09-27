@@ -37,7 +37,7 @@ explicit provisioning permits verified execution. See
 |---|---|---|---|
 | Codex | `codexPermissionMode` | `never`, `on-request`, `untrusted` | `never` |
 | OpenCode | `opencodePermissionMode` | `allow`, `ask`, `deny` | `allow` |
-| ACPX (Claude, Grok) | `acpxPermissionMode` | `approve-all`, `approve-paperclip`, `approve-reads`, `deny-all` | `approve-all` |
+| ACPX (Claude, Codex, Grok) | `acpxPermissionMode` | `approve-all`, `approve-paperclip`, `approve-reads`, `deny-all` | `approve-all` |
 
 The browser-safe source of truth for labels, defaults, and configuration
 validation is `PAPERCLIP_RUNNER_PERMISSION_CAPABILITIES` in
