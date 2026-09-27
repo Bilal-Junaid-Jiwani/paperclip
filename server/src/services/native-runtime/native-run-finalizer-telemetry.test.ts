@@ -552,6 +552,36 @@ describeEmbeddedPostgres("native run finalizer / status decision committer — a
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId))).toEqual([]);
   });
 
+  it("materializes recovery for an agent-owned invalid-result outcome", async () => {
+    const fixture = await seedNativeRun();
+    await db.insert(nativeRunFinalizations).values({
+      runId: fixture.runId, companyId, issueId: fixture.issueId,
+      phase: "terminal_failure", failureCode: "native_finalization_invalid",
+      failureDetail: { recoveryOwner: { kind: "agent", agentId } },
+    });
+    const outcome = await recordNativeFinalizationFailure({
+      db, runId: fixture.runId, error: new Error("native_finalization_invalid"),
+    });
+    expect(outcome.phase).toBe("retryable_failure");
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId)))
+      .toEqual([expect.objectContaining({ status: "active", ownerType: "agent", cause: "native_finalization_invalid" })]);
+  });
+
+  it("does not reopen a board-owned terminal workspace repair for a late generic failure", async () => {
+    const fixture = await seedNativeRun();
+    await db.insert(nativeRunFinalizations).values({
+      runId: fixture.runId, companyId, issueId: fixture.issueId, phase: "workspace_finalizing",
+    });
+    await recordNativeFinalizationFailure({ db, runId: fixture.runId,
+      error: new Error("native_workspace_sync_out_unrecoverable"), failureScope: "workspace", permanent: true });
+    const [before] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, fixture.runId));
+    const recoveryBefore = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId));
+    await recordNativeFinalizationFailure({ db, runId: fixture.runId, error: new Error("native_finalization_invalid") });
+    const [after] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, fixture.runId));
+    expect(after).toEqual(before);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId))).toEqual(recoveryBefore);
+  });
+
   it("emits zero events when a retryable-failure write's conditional status spread is omitted", async () => {
     const fixture = await seedNativeRun();
     // recordNativeFinalizationFailure only needs the run and coordinator rows

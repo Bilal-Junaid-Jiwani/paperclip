@@ -291,7 +291,15 @@ async function recordRetryableFailure(input: {
       eq(nativeRunFinalizations.companyId, input.run.companyId),
     )).for("update").limit(1).then((rows) => rows[0] ?? null);
     if (!current) throw new Error("native_finalization_missing");
-    if (current.phase === "committed" || current.phase === "terminal_failure"
+    // Audit-only attention first records an agent-owned invalid-result outcome;
+    // its caller still needs to materialize the normal bounded recovery action.
+    // Board-owned terminal repairs and late snapshots remain settled.
+    const recoveryOwner = record(record(current.failureDetail).recoveryOwner);
+    const pendingAgentRecovery = current.phase === "terminal_failure"
+      && input.coordinator.phase === "terminal_failure"
+      && recoveryOwner.kind === "agent" && recoveryOwner.agentId === input.run.agentId;
+    if (current.phase === "committed"
+      || (current.phase === "terminal_failure" && !pendingAgentRecovery)
       || current.leaseOwner !== input.coordinator.leaseOwner) return current;
     const [currentRun] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.run.id)).limit(1);
     if (!currentRun) throw new Error("native_finalization_run_missing");
