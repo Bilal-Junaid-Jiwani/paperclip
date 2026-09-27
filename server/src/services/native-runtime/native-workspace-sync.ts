@@ -25,7 +25,7 @@ import type {
   WorkspaceDurableSeedPaths,
   WorkspaceInboundMode,
 } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
-import { isPathManifest, manifestFileSha256, readManifestRecords, type PathManifest, type WorkspacePaths } from "@paperclipai/adapter-utils/workspace-manifest";
+import { assertWorkspaceManifestDiskSpace, isPathManifest, manifestFileSha256, readManifestRecords, type PathManifest, type WorkspacePaths } from "@paperclipai/adapter-utils/workspace-manifest";
 import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
 import { parseObject } from "../../adapters/utils.js";
 import type { NativeRestartRecoveryClaim } from "./native-restart-recovery.js";
@@ -370,6 +370,9 @@ async function persistSnapshotManifests(runId: string, snapshot: NonNullable<Pre
     if (path.dirname(oldPath) === descriptorDirectory(runId)) continue;
     const temporary = path.join(descriptorDirectory(runId), `manifest.${randomUUID()}.tmp`);
     try {
+      const sourceStat = await fs.lstat(oldPath);
+      if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error("native_workspace_sync_manifest_invalid");
+      assertWorkspaceManifestDiskSpace(descriptorDirectory(runId), sourceStat.size);
       await fs.copyFile(oldPath, temporary);
       await fs.chmod(temporary, 0o600);
       const digest = await manifestFileSha256(temporary);

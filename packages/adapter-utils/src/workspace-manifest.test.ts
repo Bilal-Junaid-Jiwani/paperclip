@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import nodeFs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
@@ -34,6 +35,21 @@ it("deduplicates paths on disk and rejects incomplete manifest metadata", async 
   expect([...workspacePaths(manifest)]).toEqual(["a", "b"]);
   expect(() => [...readManifestRecords({ ...manifest, count: 3 })]).toThrow("Incomplete");
   expect(() => [...workspacePaths(["../escape"])]).toThrow("Invalid");
+});
+
+it("refuses new manifests and fails ongoing writes when the disk reserve is exhausted", async () => {
+  const writer = await createWorkspaceManifest();
+  cleanup.push(path.dirname(writer.filePath));
+  const available = nodeFs.statfsSync(os.tmpdir(), { bigint: true });
+  vi.spyOn(nodeFs, "statfsSync").mockReturnValue({ ...available, bavail: 0n } as never);
+  try {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await expect(createWorkspaceManifest()).rejects.toMatchObject({ code: "workspace_git_scan_failed" });
+    }
+    expect(() => {
+      for (let index = 0; index < 1024; index++) writer.add("overlay", `${index}-${"x".repeat(2048)}`);
+    }).toThrow("free-space reserve");
+  } finally { writer.close(false); }
 });
 
 it("settles a late producer before removing shared storage after another scan fails", async () => {

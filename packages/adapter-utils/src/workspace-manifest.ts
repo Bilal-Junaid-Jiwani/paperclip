@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants, promises as fs } from "node:fs";
+import nodeFs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
@@ -7,6 +8,20 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 // Limits apply to one record and to SQLite's page cache, never to the list.
 export const WORKSPACE_PATH_MAX_BYTES = 64 * 1024;
 export const WORKSPACE_STREAM_CHUNK_BYTES = 64 * 1024;
+const DISK_CHECK_INTERVAL_BYTES = 1024 * 1024;
+
+/** A capacity floor, not a total filename budget. Leave room for the host. */
+export function assertWorkspaceManifestDiskSpace(directory: string, requiredBytes = 0): void {
+  const configured = Number(process.env.PAPERCLIP_WORKSPACE_MANIFEST_MIN_FREE_BYTES);
+  const minimum = Number.isSafeInteger(configured) && configured >= 64 * 1024 * 1024
+    ? configured : 256 * 1024 * 1024;
+  const stat = nodeFs.statfsSync(directory, { bigint: true });
+  if (stat.bavail * stat.bsize < BigInt(minimum) + BigInt(requiredBytes)) {
+    throw Object.assign(new Error("Workspace manifest storage is below its free-space reserve"), {
+      code: "workspace_git_scan_failed",
+    });
+  }
+}
 export interface PathManifest {
   kind: "path_manifest";
   version: 1;
@@ -41,7 +56,9 @@ export class WorkspaceManifestWriter {
   private readonly db: DatabaseSync;
   private readonly insert: StatementSync;
   private closed = false;
+  private bytesSinceDiskCheck = 0;
   constructor(readonly filePath: string) {
+    assertWorkspaceManifestDiskSpace(path.dirname(filePath));
     this.db = openDatabase(filePath, false);
     try {
       this.db.exec("PRAGMA journal_mode=DELETE; CREATE TABLE records(category TEXT, path TEXT, value TEXT NOT NULL, PRIMARY KEY(category,path)) WITHOUT ROWID;");
@@ -52,6 +69,11 @@ export class WorkspaceManifestWriter {
   add(category: string, relative: string, value = ""): void {
     assertWorkspaceRelativePath(relative);
     if (Buffer.byteLength(value) > WORKSPACE_PATH_MAX_BYTES) throw new Error("Workspace manifest value exceeds record limit");
+    this.bytesSinceDiskCheck += Buffer.byteLength(relative) + Buffer.byteLength(value);
+    if (this.bytesSinceDiskCheck >= DISK_CHECK_INTERVAL_BYTES) {
+      assertWorkspaceManifestDiskSpace(path.dirname(this.filePath));
+      this.bytesSinceDiskCheck = 0;
+    }
     this.insert.run(category, relative, value);
   }
   batch(work: () => void): void {

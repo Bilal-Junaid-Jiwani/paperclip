@@ -533,7 +533,7 @@ export async function mergeDirectoryWithBaseline(input: {
         // Reverse path order visits descendants before their parent directory.
         for (const [relative, entry] of orderedEntries(input.baseline, true)) {
           if (entry.kind === "dir" && !source.entries.has(relative)) await fs.rmdir(path.join(canonicalTargetDir, relative)).catch((error: NodeJS.ErrnoException) => {
-            if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY") throw error;
+            if (error.code !== "ENOENT" && error.code !== "ENOTEMPTY" && error.code !== "ENOTDIR") throw error;
           });
         }
         for (const [relative, entry] of orderedEntries(source)) {

@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileOptions } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,14 @@ import { isPathManifest, workspacePaths } from "@paperclipai/adapter-utils/works
 import { prepareSandboxManagedRuntime, type PreparedSandboxManagedRuntime, type SandboxManagedRuntimeClient } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 import { createWorkspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 
-const execute = promisify(execFile);
+const exec = promisify(execFile);
+async function execute(command: string, args: string[], options: ExecFileOptions = {}): Promise<void> {
+  try { await exec(command, args, options); }
+  catch (error) {
+    const stderr = String((error as { stderr?: unknown }).stderr ?? "");
+    throw new Error(`Fixture command failed: ${String(error)}\n${stderr.slice(-8192)}`, { cause: error });
+  }
+}
 const directories: string[] = [];
 const snapshots: GitWorkspaceSnapshot[] = [];
 const runtimes: PreparedSandboxManagedRuntime[] = [];
@@ -25,6 +32,7 @@ function localClient(commands: string[]): SandboxManagedRuntimeClient {
     makeDir: async (dir) => { await fs.mkdir(dir, { recursive: true }); },
     writeFile: async (file, bytes) => { await fs.writeFile(file, Buffer.from(bytes)); },
     readFile: async (file) => fs.readFile(file),
+    listFiles: async (dir) => fs.readdir(dir),
     remove: async (file) => { await fs.rm(file, { recursive: true, force: true }); },
     run: async (command) => { await execute("sh", ["-c", command]); },
     syncIn: async (operations) => {
